@@ -140,6 +140,15 @@ details > summary, [data-testid="stExpander"] summary {
     color: #4a9eff !important;
     font-weight: 600;
 }
+
+/* Waveform players: stretch 20% wider using negative margins */
+[data-testid="stCustomComponentV1"] {
+    width: 120% !important;
+    margin-left: -10% !important;
+}
+[data-testid="stCustomComponentV1"] iframe {
+    width: 100% !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
