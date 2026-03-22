@@ -6,10 +6,8 @@ Optimised for FSDZMIC S338 USB microphone.
 
 import io
 import os
-import queue
 import subprocess
 import tempfile
-import threading
 from pathlib import Path
 
 import librosa
@@ -40,15 +38,10 @@ st.set_page_config(
 _DEFAULTS = {
     "recorded_audio": None,   # (np.ndarray, int) – original recording
     "working_audio":  None,   # (np.ndarray, int) – current edited version
-    "rec_running":    False,
-    "rec_thread":     None,
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
-
-# ─── Shared recording queue ───────────────────────────────────────────────────
-_rec_q: queue.Queue = queue.Queue()
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -111,28 +104,6 @@ def plot_waveform(
     return fig
 
 
-# ─── Recording worker (runs in background thread) ────────────────────────────
-def _recording_worker(device_idx: int, samplerate: int, channels: int) -> None:
-    frames: list[np.ndarray] = []
-
-    def callback(indata, frames_count, time_info, status):
-        frames.append(indata.copy())
-
-    with sd.InputStream(
-        device=device_idx,
-        channels=channels,
-        samplerate=samplerate,
-        callback=callback,
-        dtype="float32",
-    ):
-        while st.session_state.rec_running:
-            sd.sleep(100)
-
-    arr = np.concatenate(frames, axis=0)
-    if arr.ndim > 1:
-        arr = arr.mean(axis=1)
-    _rec_q.put((arr.astype(np.float32), samplerate))
-
 
 # ─── UI ──────────────────────────────────────────────────────────────────────
 st.title("🎙️  Pod Tools – Audio Studio")
@@ -146,67 +117,18 @@ tab_rec, tab_upload, tab_edit = st.tabs(
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_rec:
     st.header("Record New Audio")
+    st.caption("Uses your browser's microphone — works with any device including FSDZMIC S338.")
 
-    if not SOUNDDEVICE_OK:
-        st.warning(
-            "⚠️  PortAudio library not found on this server.\n\n"
-            "Recording works only when running the app **locally** with a physical microphone connected.\n\n"
-            "Use the **Upload** tab to load an existing audio file."
-        )
-        st.stop()
+    audio_input = st.audio_input("🎤  Click to record")
 
-    devices = list_input_devices()
-    if not devices:
-        st.error("No audio input devices detected.")
-        st.stop()
-
-    device_labels = [f"[{i}]  {n}" for i, n in devices]
-    # Pre-select FSDZMIC S338 if present
-    default_idx = next(
-        (j for j, (_, n) in enumerate(devices) if "S338" in n or "FSDZMIC" in n.upper()),
-        0,
-    )
-
-    chosen = st.selectbox("🎤  Microphone", device_labels, index=default_idx)
-    dev_idx = devices[device_labels.index(chosen)][0]
-
-    col1, col2 = st.columns(2)
-    samplerate = col1.selectbox("Sample rate (Hz)", [44100, 48000, 96000], index=1)
-    channels   = col2.selectbox(
-        "Channels", [1, 2], index=0, format_func=lambda x: "Mono" if x == 1 else "Stereo"
-    )
-
-    c1, c2 = st.columns(2)
-    if c1.button("🔴  Start Recording", disabled=st.session_state.rec_running):
-        st.session_state.rec_running = True
-        while not _rec_q.empty():           # drain stale results
-            _rec_q.get_nowait()
-        t = threading.Thread(
-            target=_recording_worker,
-            args=(dev_idx, samplerate, channels),
-            daemon=True,
-        )
-        t.start()
-        st.session_state.rec_thread = t
-        st.rerun()
-
-    if c2.button("⏹  Stop Recording", disabled=not st.session_state.rec_running):
-        st.session_state.rec_running = False
-        if st.session_state.rec_thread:
-            st.session_state.rec_thread.join(timeout=4)
-        if not _rec_q.empty():
-            y, sr = _rec_q.get()
-            st.session_state.recorded_audio = (y, sr)
-            st.session_state.working_audio  = (y, sr)
-            st.success(f"Recorded  {len(y)/sr:.1f} s  @  {sr} Hz")
-        st.rerun()
-
-    if st.session_state.rec_running:
-        st.info("🔴  Recording in progress…  Press **Stop** when done.")
-
-    if st.session_state.recorded_audio is not None:
-        y, sr = st.session_state.recorded_audio
+    if audio_input is not None:
+        with st.spinner("Loading recording…"):
+            y, sr = load_audio_bytes(audio_input.read(), "recording.wav")
+        st.session_state.recorded_audio = (y, sr)
+        st.session_state.working_audio  = (y, sr)
+        st.success(f"Recorded  {len(y)/sr:.1f} s  @  {sr} Hz")
         st.audio(to_wav_bytes(y, sr), format="audio/wav")
+
         fname = st.text_input("Save filename", value="recording.wav")
         if st.button("💾  Save to disk", key="save_rec"):
             out = Path(fname)
