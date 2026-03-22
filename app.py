@@ -88,14 +88,14 @@ def encode_audio(y: np.ndarray, sr: int, fmt: str) -> tuple[bytes, str]:
 
 def wavesurfer_player(mp3_bytes: bytes, label: str = "", color: str = "#1db954",
                       progress_color: str = "#ff4b4b", height: int = 100) -> None:
-    """Embed an interactive WaveSurfer.js player."""
+    """Embed an interactive WaveSurfer.js player with native audio fallback."""
     b64 = base64.b64encode(mp3_bytes).decode()
     uid = abs(hash(label + color))
     html = f"""
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
     <style>
-      .ws-wrap-{uid} {{ background:#0e1117; padding:10px 14px 8px; border-radius:8px; }}
+      .ws-wrap-{uid} {{ background:#0e1117; padding:10px 14px 8px; border-radius:8px; margin-bottom:4px; }}
       .ws-label-{uid} {{ color:#aaa; font-size:12px; margin-bottom:6px; font-family:sans-serif; }}
       .ws-controls-{uid} {{ display:flex; gap:10px; align-items:center; margin-top:8px; }}
       .ws-btn-{uid} {{
@@ -109,6 +109,7 @@ def wavesurfer_player(mp3_bytes: bytes, label: str = "", color: str = "#1db954",
       }}
       .ws-stop-{uid}:hover {{ background:#777; }}
       .ws-time-{uid} {{ color:#ccc; font-size:12px; font-family:monospace; margin-left:4px; }}
+      .ws-native-{uid} {{ width:100%; margin-top:6px; }}
     </style>
     <div class="ws-wrap-{uid}">
       <div class="ws-label-{uid}">{label}</div>
@@ -122,6 +123,8 @@ def wavesurfer_player(mp3_bytes: bytes, label: str = "", color: str = "#1db954",
         </button>
         <span class="ws-time-{uid}" id="time-{uid}">0:00 / 0:00</span>
       </div>
+      <audio class="ws-native-{uid}" id="native-{uid}" controls
+             src="data:audio/mp3;base64,{b64}"></audio>
     </div>
     <script>
       (function() {{
@@ -134,7 +137,8 @@ def wavesurfer_player(mp3_bytes: bytes, label: str = "", color: str = "#1db954",
           barGap: 1,
           barRadius: 2,
           normalize: true,
-          backend: 'WebAudio',
+          backend: 'MediaElement',
+          media: document.getElementById('native-{uid}'),
         }});
         ws.load('data:audio/mp3;base64,{b64}');
 
