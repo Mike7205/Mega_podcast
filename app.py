@@ -10,7 +10,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import librosa
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -20,12 +19,7 @@ import requests
 import soundfile as sf
 import streamlit as st
 from pydub import AudioSegment
-
-try:
-    import sounddevice as sd
-    SOUNDDEVICE_OK = True
-except OSError:
-    SOUNDDEVICE_OK = False
+from scipy.signal import butter, filtfilt
 
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -36,62 +30,62 @@ st.set_page_config(
 
 # ─── Session state ────────────────────────────────────────────────────────────
 for k, v in {
-    "recorded_audio":  None,   # (np.ndarray, int) – from Record tab
-    "uploaded_audio":  None,   # (np.ndarray, int) – from Upload tab
-    "processed_audio": None,   # (np.ndarray, int) – after noise reduction
-    "mic_key":         0,      # incremented to force audio_input re-init
+    "recorded_audio":  None,
+    "uploaded_audio":  None,
+    "processed_audio": None,
+    "mic_key":         0,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
+def seg_to_numpy(seg: AudioSegment) -> tuple[np.ndarray, int]:
+    """Convert pydub AudioSegment → mono float32 numpy array."""
+    seg = seg.set_channels(1)
+    sr  = seg.frame_rate
+    raw = np.frombuffer(seg.raw_data, dtype=np.int16).astype(np.float32)
+    raw /= 32768.0
+    return raw, sr
+
+
+def numpy_to_seg(y: np.ndarray, sr: int) -> AudioSegment:
+    """Convert mono float32 numpy array → pydub AudioSegment."""
+    pcm = (np.clip(y, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+    return AudioSegment(data=pcm, sample_width=2, frame_rate=sr, channels=1)
+
+
 def load_audio_bytes(raw: bytes, filename: str = "") -> tuple[np.ndarray, int]:
+    """Load any audio format → mono float32 numpy, preserving sample rate."""
     ext = Path(filename).suffix.lower() if filename else ".wav"
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
         f.write(raw)
         tmp = f.name
     try:
-        y, sr = librosa.load(tmp, sr=None, mono=True)
+        seg = AudioSegment.from_file(tmp)
     finally:
         os.unlink(tmp)
-    return y.astype(np.float32), int(sr)
+    return seg_to_numpy(seg)
 
 
 def to_mp3_bytes(y: np.ndarray, sr: int, bitrate: str = "192k") -> bytes:
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        sf.write(tmp.name, y, sr)
-        seg = AudioSegment.from_wav(tmp.name)
-        os.unlink(tmp.name)
     buf = io.BytesIO()
-    seg.export(buf, format="mp3", bitrate=bitrate)
+    numpy_to_seg(y, sr).export(buf, format="mp3", bitrate=bitrate)
     return buf.getvalue()
 
 
 def encode_audio(y: np.ndarray, sr: int, fmt: str) -> tuple[bytes, str]:
-    """Encode numpy audio to bytes in the requested format."""
+    seg = numpy_to_seg(y, sr)
     buf = io.BytesIO()
     if fmt == "WAV":
         sf.write(buf, y, sr, format="WAV")
         return buf.getvalue(), "audio/wav"
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        sf.write(tmp.name, y, sr)
-        seg = AudioSegment.from_wav(tmp.name)
-        os.unlink(tmp.name)
-    out = io.BytesIO()
     if fmt == "MP4":
-        seg.export(out, format="mp4", codec="aac")
-        return out.getvalue(), "audio/mp4"
-    seg.export(out, format=fmt.lower())
+        seg.export(buf, format="mp4", codec="aac")
+        return buf.getvalue(), "audio/mp4"
+    seg.export(buf, format=fmt.lower())
     mime = {"MP3": "audio/mpeg", "FLAC": "audio/flac"}.get(fmt, "audio/octet-stream")
-    return out.getvalue(), mime
-
-
-def audio_player(mp3_bytes: bytes, label: str = "", color: str = "#1db954") -> None:
-    """Show waveform plot + native st.audio player."""
-    if label:
-        st.caption(label)
-    st.audio(mp3_bytes, format="audio/mp3")
+    return buf.getvalue(), mime
 
 
 def plot_waveform(y: np.ndarray, sr: int, title: str = "",
@@ -99,7 +93,8 @@ def plot_waveform(y: np.ndarray, sr: int, title: str = "",
     dur = len(y) / sr
     if end_s is None:
         end_s = dur
-    times = np.linspace(0, dur, num=min(len(y), 8000))   # downsample for speed
+    n    = min(len(y), 8000)
+    times = np.linspace(0, dur, n)
     y_ds  = np.interp(times, np.linspace(0, dur, len(y)), y)
 
     fig, ax = plt.subplots(figsize=(12, 2.5), facecolor="#0e1117")
@@ -120,6 +115,37 @@ def plot_waveform(y: np.ndarray, sr: int, title: str = "",
     return fig
 
 
+def pitch_shift_pydub(y: np.ndarray, sr: int, semitones: float) -> np.ndarray:
+    """Shift pitch via frame-rate trick (also shifts speed slightly)."""
+    seg     = numpy_to_seg(y, sr)
+    factor  = 2 ** (semitones / 12)
+    shifted = seg._spawn(seg.raw_data, overrides={"frame_rate": int(sr * factor)})
+    shifted = shifted.set_frame_rate(sr)
+    result, _ = seg_to_numpy(shifted)
+    return result
+
+
+def time_stretch_pydub(y: np.ndarray, sr: int, rate: float) -> np.ndarray:
+    """Speed up / slow down via frame-rate trick, preserving pitch."""
+    seg       = numpy_to_seg(y, sr)
+    new_rate  = int(sr / rate)
+    stretched = seg._spawn(seg.raw_data, overrides={"frame_rate": new_rate})
+    stretched = stretched.set_frame_rate(sr)
+    result, _ = seg_to_numpy(stretched)
+    return result
+
+
+def vocal_enhance(y: np.ndarray, sr: int, strength: float) -> np.ndarray:
+    """Boost mid-range vocal frequencies via bandpass blend."""
+    if strength == 0:
+        return y
+    lo, hi = 200, 4000
+    b_hp, a_hp = butter(4, lo / (sr / 2), btype="high")
+    b_lp, a_lp = butter(4, hi / (sr / 2), btype="low")
+    y_mid = filtfilt(b_lp, a_lp, filtfilt(b_hp, a_hp, y))
+    return ((1 - strength) * y + strength * y_mid).astype(np.float32)
+
+
 # ─── UI ──────────────────────────────────────────────────────────────────────
 st.title("🎙️  Pod Tools – Audio Studio")
 
@@ -134,7 +160,7 @@ with tab_rec:
     st.header("Record New Audio")
     st.caption("Uses your browser's microphone — works with FSDZMIC S338 and any other device.")
 
-    if st.button("🔄  Reset microphone", help="Use this if the recorder shows an error"):
+    if st.button("🔄  Reset microphone", help="Use if recorder shows an error"):
         st.session_state.mic_key += 1
         st.rerun()
 
@@ -144,11 +170,7 @@ with tab_rec:
         raw_bytes = audio_input.read()
 
         with st.spinner("Converting…"):
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp.write(raw_bytes)
-                tmp_path = tmp.name
-            seg = AudioSegment.from_file(tmp_path)
-            os.unlink(tmp_path)
+            seg = AudioSegment.from_file(io.BytesIO(raw_bytes))
 
             mp3_buf = io.BytesIO()
             seg.export(mp3_buf, format="mp3", bitrate="192k")
@@ -158,23 +180,18 @@ with tab_rec:
             seg.export(mp4_buf, format="mp4", codec="aac")
             mp4_bytes = mp4_buf.getvalue()
 
-            y, sr = load_audio_bytes(raw_bytes, "recording.wav")
+            y, sr = seg_to_numpy(seg)
 
         st.session_state.recorded_audio = (y, sr)
         st.success(f"Recorded  {len(y)/sr:.1f}s  |  {sr} Hz  →  go to **Edit & Export** to process")
 
         fig = plot_waveform(y, sr, "Recording preview")
-        st.pyplot(fig); plt.close(fig)
+        st.pyplot(fig)
+        plt.close(fig)
         st.audio(mp3_bytes, format="audio/mp3")
 
         fname = st.text_input("Filename", value="recording.mp4")
-        st.download_button(
-            label="💾  Save as MP4",
-            data=mp4_bytes,
-            file_name=fname,
-            mime="audio/mp4",
-            key="dl_rec",
-        )
+        st.download_button("💾  Save as MP4", mp4_bytes, fname, "audio/mp4", key="dl_rec")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 – UPLOAD
@@ -193,7 +210,7 @@ with tab_upload:
             with st.spinner("Loading…"):
                 y, sr = load_audio_bytes(uploaded.read(), uploaded.name)
             st.session_state.uploaded_audio = (y, sr)
-            st.success(f"Loaded: {uploaded.name}  |  {len(y)/sr:.1f}s  @  {sr} Hz  →  go to **Edit & Export**")
+            st.success(f"Loaded: {uploaded.name}  |  {len(y)/sr:.1f}s  @  {sr} Hz")
 
     else:
         url = st.text_input("Paste a direct audio URL or YouTube / SoundCloud link")
@@ -208,8 +225,8 @@ with tab_upload:
                         )
                         wav_files = list(Path(tmp).glob("*.wav"))
                         if wav_files:
-                            y, sr = librosa.load(str(wav_files[0]), sr=None, mono=True)
-                            st.session_state.uploaded_audio = (y.astype(np.float32), int(sr))
+                            y, sr = load_audio_bytes(wav_files[0].read_bytes(), ".wav")
+                            st.session_state.uploaded_audio = (y, sr)
                             st.success(f"Downloaded  |  {len(y)/sr:.1f}s  @  {sr} Hz")
                         else:
                             raise RuntimeError(res.stderr[:300] or "yt-dlp: no output file")
@@ -226,10 +243,10 @@ with tab_upload:
 
     if st.session_state.uploaded_audio is not None:
         y, sr = st.session_state.uploaded_audio
-        mp3_prev = to_mp3_bytes(y, sr)
         fig = plot_waveform(y, sr, "Uploaded file")
-        st.pyplot(fig); plt.close(fig)
-        st.audio(mp3_prev, format="audio/mp3")
+        st.pyplot(fig)
+        plt.close(fig)
+        st.audio(to_mp3_bytes(y, sr), format="audio/mp3")
         st.caption(f"Duration: {len(y)/sr:.1f}s  |  {sr} Hz")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -238,7 +255,6 @@ with tab_upload:
 with tab_edit:
     st.header("Edit & Export")
 
-    # ── Source selector ───────────────────────────────────────────────────────
     sources = {}
     if st.session_state.recorded_audio is not None:
         sources["Last recording"] = st.session_state.recorded_audio
@@ -253,13 +269,10 @@ with tab_edit:
     y_orig, sr = sources[chosen_src]
     dur = len(y_orig) / sr
 
-    # Use processed version if available for the same source, else original
-    y_work = st.session_state.processed_audio[0] if st.session_state.processed_audio else y_orig
-
     st.divider()
 
-    # ── Interactive waveform players (stacked) ───────────────────────────────
-    st.subheader("Waveform Player")
+    # ── Waveform + player ─────────────────────────────────────────────────────
+    st.subheader("Waveform")
 
     if st.session_state.processed_audio is not None:
         y_proc_arr, _ = st.session_state.processed_audio
@@ -280,7 +293,7 @@ with tab_edit:
 
     st.divider()
 
-    # ── Processing parameters ─────────────────────────────────────────────────
+    # ── Processing ────────────────────────────────────────────────────────────
     st.subheader("Processing")
 
     with st.expander("🔇  Noise Reduction", expanded=True):
@@ -294,32 +307,27 @@ with tab_edit:
         vc1, vc2 = st.columns(2)
         vocal_clarity = vc1.slider(
             "Vocal clarity", 0.0, 1.0, 0.0, 0.05,
-            help="Separates harmonic (voice) from percussive content. "
-                 "Strengthens the voice track against background noise.",
+            help="Boosts 200–4000 Hz (voice range), reduces lows and highs.",
         )
         hp_cutoff = vc2.slider(
             "Low-cut filter (Hz)", 0, 500, 80, 10,
-            help="Removes low-frequency rumble below this frequency. "
-                 "80–120 Hz is safe for voice; higher values thin the sound.",
+            help="Removes rumble below this frequency. 80–120 Hz safe for voice.",
         )
 
     with st.expander("🎚️  Voice Modulation", expanded=True):
         vm1, vm2 = st.columns(2)
         pitch_steps = vm1.slider(
             "Pitch shift (semitones)", -12, 12, 0,
-            help="Shifts pitch up (+) or down (−). "
-                 "±2 is subtle, ±6 is clearly audible, ±12 = one octave.",
+            help="Shifts pitch up (+) or down (−). ±2 subtle, ±12 = one octave.",
         )
-        time_stretch = vm2.slider(
+        time_rate = vm2.slider(
             "Speed ×", 0.5, 2.0, 1.0, 0.05,
-            help="< 1.0 = slower, > 1.0 = faster. Pitch is preserved.",
+            help="< 1.0 = slower, > 1.0 = faster.",
         )
 
     bc1, bc2 = st.columns(2)
     if bc1.button("▶  Apply & compare"):
-        with st.spinner("Processing… may take a moment"):
-            from scipy.signal import butter, filtfilt
-
+        with st.spinner("Processing…"):
             y_proc = y_orig.copy()
 
             # 1. Low-cut filter
@@ -333,10 +341,9 @@ with tab_edit:
                                          prop_decrease=noise_prop,
                                          stationary=stationary)
 
-            # 3. Vocal clarity (harmonic separation)
+            # 3. Vocal clarity
             if vocal_clarity > 0:
-                y_harm = librosa.effects.harmonic(y_proc, margin=4.0)
-                y_proc = ((1 - vocal_clarity) * y_proc + vocal_clarity * y_harm).astype(np.float32)
+                y_proc = vocal_enhance(y_proc, sr, vocal_clarity)
 
             # 4. Gain
             if gain_db != 0:
@@ -344,11 +351,11 @@ with tab_edit:
 
             # 5. Pitch shift
             if pitch_steps != 0:
-                y_proc = librosa.effects.pitch_shift(y_proc, sr=sr, n_steps=pitch_steps)
+                y_proc = pitch_shift_pydub(y_proc, sr, pitch_steps)
 
             # 6. Time stretch
-            if time_stretch != 1.0:
-                y_proc = librosa.effects.time_stretch(y_proc, rate=time_stretch)
+            if time_rate != 1.0:
+                y_proc = time_stretch_pydub(y_proc, sr, time_rate)
 
             st.session_state.processed_audio = (y_proc.astype(np.float32), sr)
         st.rerun()
@@ -359,7 +366,7 @@ with tab_edit:
 
     st.divider()
 
-    # ── Split & save ─────────────────────────────────────────────────────────
+    # ── Split & save ──────────────────────────────────────────────────────────
     st.subheader("Split & Save")
 
     wc1, wc2 = st.columns(2)
