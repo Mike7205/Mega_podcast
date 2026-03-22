@@ -133,6 +133,13 @@ p, span, div {
 .stSlider [data-baseweb="slider"] {
     filter: sepia(0.3) hue-rotate(-10deg);
 }
+
+/* Expander header text — blue so it's readable on dark background */
+.streamlit-expanderHeader, .st-emotion-cache-ue6h4q,
+details > summary, [data-testid="stExpander"] summary {
+    color: #4a9eff !important;
+    font-weight: 600;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -384,8 +391,8 @@ def apply_processing(y: np.ndarray, sr: int,
 # ─── UI ──────────────────────────────────────────────────────────────────────
 st.title("🎙️  Podcast Studio")
 
-tab_rec, tab_upload, tab_edit = st.tabs(
-    ["⏺  Record", "⬆️  Upload", "✂️  Edit & Export"]
+tab_rec, tab_edit = st.tabs(
+    ["⏺  Record", "✂️  Edit & Export"]
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -421,67 +428,7 @@ with tab_rec:
         st.download_button("💾  Save as MP4", dl_bytes, dl_name, dl_mime, key="dl_rec")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 – UPLOAD
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_upload:
-    st.header("Upload Audio File")
-
-    src = st.radio("Source", ["Local file", "URL / YouTube"], horizontal=True)
-
-    if src == "Local file":
-        uploaded = st.file_uploader(
-            "Choose a file",
-            type=["wav", "mp3", "mp4", "m4a", "ogg", "flac", "aac"],
-        )
-        if uploaded and st.button("Load file"):
-            with st.spinner("Loading…"):
-                raw = uploaded.read()
-                ext = Path(uploaded.name).suffix.lower()
-                if ext == ".wav":
-                    y, sr = wav_bytes_to_numpy(raw)
-                else:
-                    wav = any_to_wav_bytes(raw, suffix=ext)
-                    y, sr = wav_bytes_to_numpy(wav)
-            st.session_state.uploaded_audio = (y, sr)
-            st.success(f"Loaded: {uploaded.name}  |  {len(y)/sr:.1f}s  @  {sr} Hz")
-
-    else:
-        url = st.text_input("Paste a YouTube / SoundCloud / direct URL")
-        if url and st.button("Download & Load"):
-            with st.spinner("Downloading…"):
-                try:
-                    with tempfile.TemporaryDirectory() as tmp:
-                        out_tmpl = os.path.join(tmp, "audio.%(ext)s")
-                        res = subprocess.run(
-                            ["yt-dlp", "-x", "--audio-format", "wav",
-                             "-o", out_tmpl, url],
-                            capture_output=True, text=True, timeout=180,
-                        )
-                        wav_files = list(Path(tmp).glob("*.wav"))
-                        if not wav_files:
-                            raise RuntimeError(res.stderr[:300] or "No output file")
-                        y, sr = wav_bytes_to_numpy(wav_files[0].read_bytes())
-                        st.session_state.uploaded_audio = (y, sr)
-                        st.success(f"Downloaded  |  {len(y)/sr:.1f}s  @  {sr} Hz")
-                except Exception as e_yt:
-                    try:
-                        r = requests.get(url, timeout=60)
-                        r.raise_for_status()
-                        ext = "." + (url.split(".")[-1].split("?")[0] or "mp3")
-                        wav = any_to_wav_bytes(r.content, suffix=ext)
-                        y, sr = wav_bytes_to_numpy(wav)
-                        st.session_state.uploaded_audio = (y, sr)
-                        st.success(f"Downloaded  |  {len(y)/sr:.1f}s  @  {sr} Hz")
-                    except Exception as e_http:
-                        st.error(f"yt-dlp: {e_yt}\nHTTP: {e_http}")
-
-    if st.session_state.uploaded_audio is not None:
-        y, sr = st.session_state.uploaded_audio
-        show_player(y, sr, "Uploaded file")
-        st.caption(f"Duration: {len(y)/sr:.1f}s  |  {sr} Hz  →  go to **Edit & Export**")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 – EDIT & EXPORT
+# TAB 2 – EDIT & EXPORT
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_edit:
     st.header("Edit & Export")
