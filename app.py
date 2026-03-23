@@ -324,13 +324,25 @@ def show_player(y: np.ndarray, sr: int, title: str = "",
     }}
 
     // Start / End trim markers
-    ctx.setLineDash([4, 3]);
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = "#ff4b4b";
-    ctx.beginPath(); ctx.moveTo(startFrac * W, 0); ctx.lineTo(startFrac * W, H); ctx.stroke();
-    ctx.strokeStyle = "#ffa64b";
-    ctx.beginPath(); ctx.moveTo(endFrac * W, 0); ctx.lineTo(endFrac * W, H); ctx.stroke();
-    ctx.setLineDash([]);
+    function drawMarker(x, col, label) {{
+      // solid line
+      ctx.setLineDash([]);
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = col;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      // top handle triangle
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.moveTo(x - 7, 0); ctx.lineTo(x + 7, 0); ctx.lineTo(x, 10); ctx.closePath(); ctx.fill();
+      // bottom handle triangle
+      ctx.beginPath(); ctx.moveTo(x - 7, H); ctx.lineTo(x + 7, H); ctx.lineTo(x, H - 10); ctx.closePath(); ctx.fill();
+      // label
+      ctx.font = "bold 10px sans-serif";
+      ctx.fillStyle = col;
+      const lx = (x + 6 + 36 < W) ? x + 6 : x - 42;
+      ctx.fillText(label, lx, 14);
+    }}
+    drawMarker(startFrac * W, "#ff4b4b", "start");
+    drawMarker(endFrac   * W, "#ffa64b", "end");
 
     // Moving red playhead
     if (progress > 0 && progress <= 1) {{
@@ -587,26 +599,44 @@ with tab_edit:
 
     # Split & Save
     st.subheader("Split & Save")
-    c1, c2 = st.columns(2)
-    split_start = c1.number_input("Segment start (s)", 0.0, float(dur), 0.0, 0.1)
-    split_end   = c2.number_input("Segment end (s)",   0.0, float(dur), float(dur), 0.1)
 
-    s1 = max(0, int(split_start * sr))
-    s2 = min(len(y_work), int(split_end * sr))
-    segment = y_work[s1:s2]
-
-    if len(segment) > 0:
-        show_player(segment, sr,
-                    f"Segment  {split_start:.2f}s → {split_end:.2f}s",
-                    0.0, split_end - split_start)
-        c1, c2 = st.columns(2)
-        seg_name = c1.text_input("Segment filename", "segment.mp4")
-        seg_fmt  = c2.selectbox("Format", ["MP4", "MP3", "WAV", "FLAC"], key="seg_fmt")
-        seg_bytes, seg_mime = encode_for_download(segment, sr, seg_fmt)
-        seg_fname = str(Path(seg_name).with_suffix("." + seg_fmt.lower()))
-        st.download_button("💾  Save segment", seg_bytes, seg_fname, seg_mime, key="dl_seg")
+    if st.session_state.processed_audio is None:
+        st.info("⚙️  Apply processing first — Split & Save works only on the processed audio.")
     else:
-        st.warning("Segment is empty – adjust start / end times.")
+        y_split, sr_split = st.session_state.processed_audio
+        dur_split = float(len(y_split) / sr_split)
+
+        seg_range = st.slider(
+            "Drag handles to set segment start / end",
+            min_value=0.0,
+            max_value=dur_split,
+            value=(0.0, dur_split),
+            step=0.01,
+            format="%.2f s",
+            key="split_range",
+        )
+        split_start, split_end = float(seg_range[0]), float(seg_range[1])
+
+        show_player(
+            y_split, sr_split,
+            f"Segment  {split_start:.2f}s → {split_end:.2f}s",
+            split_start, split_end,
+            color="#4a9eff",
+        )
+
+        s1 = max(0, int(split_start * sr_split))
+        s2 = min(len(y_split), int(split_end * sr_split))
+        segment = y_split[s1:s2]
+
+        if len(segment) > 0:
+            c1, c2 = st.columns(2)
+            seg_name = c1.text_input("Segment filename", "segment.mp4", key="seg_name_split")
+            seg_fmt  = c2.selectbox("Format", ["MP4", "MP3", "WAV", "FLAC"], key="seg_fmt")
+            seg_bytes, seg_mime = encode_for_download(segment, sr_split, seg_fmt)
+            seg_fname = str(Path(seg_name).with_suffix("." + seg_fmt.lower()))
+            st.download_button("💾  Save segment", seg_bytes, seg_fname, seg_mime, key="dl_seg")
+        else:
+            st.warning("Segment is empty — adjust the handles.")
 
     st.divider()
 
