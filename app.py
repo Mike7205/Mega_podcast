@@ -569,6 +569,19 @@ _VIDEO_REC_HTML = """
       style="width:100%;display:block;border-radius:6px;margin-top:5px;background:#1c1c1e;">
     </canvas>
 
+    <!-- mic dropout warning -->
+    <div id="micWarn" style="display:none;margin-top:6px;padding:8px 12px;
+         border-radius:6px;background:rgba(180,40,40,0.85);color:#fff;
+         font-size:13px;font-weight:600;align-items:center;gap:10px;">
+      ⚠️ Mikrofon rozłączył się! Nagranie może nie mieć dźwięku.
+      <button id="restartMicBtn"
+        style="padding:4px 12px;border-radius:5px;border:1px solid #fff;
+               background:rgba(255,255,255,0.2);color:#fff;cursor:pointer;
+               font-size:12px;font-weight:600;">
+        🔄 Wznów mikrofon
+      </button>
+    </div>
+
     <!-- device selectors — compact single row -->
     <div class="row">
       <div style="flex:1;min-width:140px;">
@@ -662,25 +675,36 @@ _VIDEO_REC_HTML = """
     const canvas = $('vu');
     const c = canvas.getContext('2d');
 
+    // ── Watch audio track — warn if it dies ──────────────────────────────
+    const audioTrack = audioStream.getAudioTracks()[0];
+    if(audioTrack){
+      audioTrack.onended = ()=>{
+        cancelAnimationFrame(vuRaf);
+        $('micWarn').style.display='flex';
+      };
+    }
+
     function draw(){
       vuRaf = requestAnimationFrame(draw);
+      // Keep AudioContext alive — Chrome suspends it after inactivity
+      if(actx.state === 'suspended') actx.resume();
+
       canvas.width = canvas.offsetWidth;
       const W = canvas.width, H = canvas.height;
-      analyser.getByteTimeDomainData(dataArr);   // waveform, not spectrum
+      analyser.getByteTimeDomainData(dataArr);
 
       c.fillStyle = '#1c1c1e';
       c.fillRect(0, 0, W, H);
 
-      const bars  = 120;
-      const step  = Math.floor(dataArr.length / bars);
-      const barW  = W / bars;
-      const color = '#1db954';                   // same green as audio_input
+      const bars = 120;
+      const step = Math.floor(dataArr.length / bars);
+      const barW = W / bars;
+      const color = '#1db954';
 
       for(let i = 0; i < bars; i++){
-        // average a small window around each bar
         let sum = 0;
         for(let j = 0; j < step; j++) sum += Math.abs(dataArr[i*step+j] - 128);
-        const amp = (sum / step) / 128;          // 0-1
+        const amp = (sum / step) / 128;
         const h   = Math.max(2, amp * H * 1.8);
         const x   = i * barW + barW * 0.15;
         const y   = (H - h) / 2;
@@ -787,6 +811,30 @@ _VIDEO_REC_HTML = """
   $('stopBtn').onclick=function(){
     recorder.stop();
     $('stopBtn').disabled=true;
+  };
+
+  // ── Restart mic (dropout recovery) ───────────────────────────────────
+  $('restartMicBtn').onclick=async function(){
+    try{
+      const micId=$('micSel').value;
+      const newAudio = await navigator.mediaDevices.getUserMedia({
+        audio:{
+          deviceId: micId?{exact:micId}:undefined,
+          echoCancellation:false, noiseSuppression:false,
+          autoGainControl:false, sampleRate:48000, channelCount:2
+        }
+      });
+      // Replace audio track in the existing recorder stream
+      const newTrack = newAudio.getAudioTracks()[0];
+      const sender   = stream.getAudioTracks()[0];
+      if(sender) stream.removeTrack(sender);
+      stream.addTrack(newTrack);
+      $('micWarn').style.display='none';
+      startVU(stream);
+      $('status2').textContent='✅ Mikrofon wznowiony.';
+    }catch(e){
+      $('status2').textContent='⚠ Nie można wznowić mikrofonu: '+e.message;
+    }
   };
 
   // ── New recording ─────────────────────────────────────────────────────
