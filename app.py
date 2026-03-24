@@ -596,9 +596,15 @@ _VIDEO_REC_HTML = """
   <!-- Phase 3: playback + download -->
   <div id="resultBox">
     <video id="playback" controls playsinline></video>
-    <div class="row">
-      <a id="dlBtn">💾 Pobierz nagranie</a>
-      <button id="newBtn">🔄 Nowe nagranie</button>
+    <div class="row" style="margin-top:8px;">
+      <div style="flex:1;min-width:180px;">
+        <label>💾 Nazwa pliku</label>
+        <input id="fname" type="text" value="nagranie_av"
+          style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid #c4884a;
+                 background:rgba(30,15,5,0.9);color:#f0e0c8;font-size:13px;">
+      </div>
+      <a id="dlBtn" style="align-self:flex-end;">💾 Pobierz</a>
+      <button id="newBtn" style="align-self:flex-end;">🔄 Nowe nagranie</button>
     </div>
     <div class="status" id="status3"></div>
   </div>
@@ -753,8 +759,14 @@ _VIDEO_REC_HTML = """
       const url=URL.createObjectURL(blob);
       $('playback').src=url;
       $('dlBtn').href=url;
-      $('dlBtn').download='nagranie_av.'+EXT;
-      $('dlBtn').textContent='💾 Pobierz nagranie.'+EXT;
+      // update download name live when user edits the field
+      function refreshDl(){
+        const name=($('fname').value.trim()||'nagranie_av').replace(/\.[^.]+$/,'');
+        $('dlBtn').download=name+'.'+EXT;
+        $('dlBtn').textContent='💾 Pobierz '+name+'.'+EXT;
+      }
+      $('fname').oninput=refreshDl;
+      refreshDl();
       const mb=(blob.size/1048576).toFixed(1);
       $('status3').textContent='Rozmiar: '+mb+' MB  |  Format: '+(recorder.mimeType||EXT);
       $('recordPhase').style.display='none';
