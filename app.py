@@ -508,6 +508,116 @@ def apply_processing(y: np.ndarray, sr: int,
     return out.astype(np.float32)
 
 
+# ─── Video recorder HTML component ───────────────────────────────────────────
+_VIDEO_REC_HTML = """
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: transparent; font-family: sans-serif; }
+  #wrap {
+    background: rgba(20,10,5,0.88);
+    border-radius: 10px;
+    padding: 14px;
+    color: #f0e0c8;
+  }
+  #preview {
+    width: 100%; border-radius: 6px; background: #000;
+    max-height: 280px; object-fit: cover; display: block;
+  }
+  #playback { width: 100%; border-radius: 6px; margin-top: 10px; display: block; }
+  .controls { display: flex; gap: 10px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+  button {
+    padding: 8px 18px; border-radius: 6px;
+    border: 1px solid #c4884a;
+    background: rgba(139,92,42,0.85);
+    color: #fff5e0; cursor: pointer;
+    font-size: 14px; font-weight: 600;
+  }
+  button:disabled { opacity: 0.35; cursor: not-allowed; }
+  button:hover:not(:disabled) { background: rgba(180,120,60,0.95); }
+  #stopBtn  { border-color: #e05050; background: rgba(120,40,40,0.85); }
+  #stopBtn:hover:not(:disabled) { background: rgba(180,60,60,0.95); }
+  #dlBtn {
+    display: inline-block; margin-top: 10px;
+    padding: 8px 18px; border-radius: 6px;
+    border: 1px solid #6aaa6a;
+    background: rgba(40,100,60,0.85);
+    color: #d4f0d4; text-decoration: none;
+    font-size: 14px; font-weight: 600;
+  }
+  #timer  { color: #ff7070; font-weight: 700; font-size: 15px; min-width: 58px; }
+  #status { color: #aaa; font-size: 13px; margin-top: 8px; }
+  #resultBox { display: none; }
+</style>
+<div id="wrap">
+  <video id="preview" autoplay muted playsinline></video>
+  <div class="controls">
+    <button id="startBtn">🔴 Nagraj</button>
+    <button id="stopBtn" disabled>⏹ Stop</button>
+    <span id="timer">00:00</span>
+  </div>
+  <div id="status">Inicjalizacja kamery…</div>
+  <div id="resultBox">
+    <video id="playback" controls playsinline></video>
+    <br><a id="dlBtn">💾 Pobierz nagranie</a>
+  </div>
+</div>
+<script>
+(function(){
+  let stream, recorder, chunks=[], timerIv, t0;
+  const $=id=>document.getElementById(id);
+  const pad=n=>String(n).padStart(2,'0');
+
+  navigator.mediaDevices.getUserMedia({video:true, audio:true})
+    .then(s=>{
+      stream=s;
+      $('preview').srcObject=s;
+      $('status').textContent='Kamera gotowa — kliknij Nagraj';
+    })
+    .catch(e=>{
+      $('status').textContent='⚠ Brak dostępu do kamery: '+e.message;
+      $('startBtn').disabled=true;
+    });
+
+  $('startBtn').onclick=function(){
+    chunks=[];
+    const mime=['video/mp4;codecs=avc1,mp4a.40.2','video/mp4',
+                'video/webm;codecs=vp9,opus','video/webm']
+      .find(t=>MediaRecorder.isTypeSupported(t))||'';
+    recorder=new MediaRecorder(stream, mime?{mimeType:mime}:{});
+    recorder.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data);};
+    recorder.onstop=()=>{
+      clearInterval(timerIv);
+      const blob=new Blob(chunks,{type:recorder.mimeType||'video/webm'});
+      const url=URL.createObjectURL(blob);
+      const ext=(recorder.mimeType||'').includes('mp4')?'mp4':'webm';
+      $('playback').src=url;
+      $('dlBtn').href=url;
+      $('dlBtn').download='nagranie_av.'+ext;
+      $('dlBtn').textContent='💾 Pobierz nagranie.'+ext;
+      $('resultBox').style.display='block';
+      $('status').textContent='Nagranie gotowe — odtwórz lub pobierz poniżej.';
+    };
+    recorder.start(100);
+    t0=Date.now();
+    timerIv=setInterval(()=>{
+      const s=Math.floor((Date.now()-t0)/1000);
+      $('timer').textContent=pad(Math.floor(s/60))+':'+pad(s%60);
+    },500);
+    $('startBtn').disabled=true;
+    $('stopBtn').disabled=false;
+    $('resultBox').style.display='none';
+    $('status').textContent='🔴 Nagrywanie…';
+  };
+
+  $('stopBtn').onclick=function(){
+    recorder.stop();
+    $('stopBtn').disabled=true;
+    $('startBtn').disabled=false;
+  };
+})();
+</script>
+"""
+
 # ─── UI ──────────────────────────────────────────────────────────────────────
 st.title("🎙️  Podcast Studio")
 
@@ -520,32 +630,48 @@ tab_rec, tab_edit = st.tabs(
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_rec:
     st.header("Record New Audio")
-    st.caption("Uses your browser's microphone — works with FSDZMIC S338 and any other device.")
+    st.caption("Works with FSDZMIC S338 and any other device.")
 
-    if st.button("🔄  Reset microphone", help="Click if the recorder shows an error"):
-        st.session_state.mic_key += 1
-        st.rerun()
+    rec_mode = st.radio(
+        "Recording mode",
+        ["🎤  Audio only", "🎥  Audio + Video"],
+        horizontal=True,
+        help="Audio only — saves to session for editing in Edit & Export tab.\n"
+             "Audio + Video — records camera + microphone, download directly from browser.",
+    )
 
-    audio_input = st.audio_input("🎤  Click to record",
-                                 key=f"mic_{st.session_state.mic_key}")
+    if rec_mode == "🎤  Audio only":
+        if st.button("🔄  Reset microphone", help="Click if the recorder shows an error"):
+            st.session_state.mic_key += 1
+            st.rerun()
 
-    if audio_input is not None:
-        raw_wav = audio_input.read()
+        audio_input = st.audio_input("🎤  Click to record",
+                                     key=f"mic_{st.session_state.mic_key}")
 
-        with st.spinner("Loading…"):
-            y, sr = wav_bytes_to_numpy(raw_wav)
+        if audio_input is not None:
+            raw_wav = audio_input.read()
 
-        st.session_state.recorded_audio = (y, sr)
-        st.success(f"Recorded  {len(y)/sr:.1f}s  |  {sr} Hz")
+            with st.spinner("Loading…"):
+                y, sr = wav_bytes_to_numpy(raw_wav)
 
-        # Waveform + playback (raw WAV — no conversion needed)
-        show_player(y, sr, "Recording preview")
+            st.session_state.recorded_audio = (y, sr)
+            st.success(f"Recorded  {len(y)/sr:.1f}s  |  {sr} Hz")
 
-        st.divider()
-        fname = st.text_input("Save filename", value="recording.mp4")
-        dl_bytes, dl_mime = encode_for_download(y, sr, "MP4")
-        dl_name = str(Path(fname).with_suffix(".mp4"))
-        st.download_button("💾  Save as MP4", dl_bytes, dl_name, dl_mime, key="dl_rec")
+            show_player(y, sr, "Recording preview")
+
+            st.divider()
+            fname = st.text_input("Save filename", value="recording.mp4")
+            dl_bytes, dl_mime = encode_for_download(y, sr, "MP4")
+            dl_name = str(Path(fname).with_suffix(".mp4"))
+            st.download_button("💾  Save as MP4", dl_bytes, dl_name, dl_mime, key="dl_rec")
+
+    else:
+        st.info(
+            "Nagrywa kamerę + mikrofon bezpośrednio w przeglądarce. "
+            "Po zakończeniu pobierz plik MP4/WebM przyciskiem poniżej.",
+            icon="🎥",
+        )
+        st.components.v1.html(_VIDEO_REC_HTML, height=560)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 – EDIT & EXPORT
