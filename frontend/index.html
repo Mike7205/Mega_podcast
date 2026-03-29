@@ -60,6 +60,21 @@
   .status{color:#888;font-size:12px;margin-top:6px;}
   #resultBox,#recordPhase{display:none;}
   #initPhase{text-align:center;padding:30px 0;}
+
+  /* Post-processing panel */
+  #ppBox{display:none;margin-top:14px;background:rgba(0,0,0,0.45);border-radius:8px;padding:12px;}
+  .pp-step{margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid rgba(196,136,74,0.2);}
+  .pp-step:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0;}
+  .pp-h{color:#f0e0c8;font-size:14px;font-weight:700;margin-bottom:8px;}
+  #ppDlBtn{display:none;padding:8px 16px;border-radius:6px;border:1px solid #6aaa6a;
+           background:rgba(40,100,60,0.85);color:#d4f0d4;text-decoration:none;
+           font-size:14px;font-weight:600;}
+  input[type=color]{width:36px;height:28px;border:1px solid #c4884a;border-radius:4px;
+                    background:none;cursor:pointer;padding:2px;}
+  input[type=range]{accent-color:#1db954;}
+  input.pp-name{flex:1;min-width:0;padding:6px 10px;border-radius:6px;
+                border:1px solid #c4884a;background:rgba(30,15,5,0.9);
+                color:#f0e0c8;font-size:13px;}
 </style>
 </head>
 <body>
@@ -132,6 +147,57 @@
     <div class="status" id="status3"></div>
   </div>
 
+  <!-- Phase 4: Post-processing (browser-side, FFmpeg.wasm) -->
+  <div id="ppBox">
+
+    <div class="pp-step">
+      <div class="pp-h">🖼️ Krok 1 — Zamiana tła</div>
+      <div class="row">
+        <label style="margin:0;font-size:12px;white-space:nowrap;">Metoda:</label>
+        <select id="ppMethod" style="width:auto;flex:none;">
+          <option value="chromakey">🎨 Chromakey (jednolite tło)</option>
+          <option value="overlay">📽️ Tylko nałóż tło (bez usuwania)</option>
+        </select>
+      </div>
+      <div class="row" id="ppColorRow">
+        <label style="margin:0;font-size:12px;white-space:nowrap;">Kolor do usunięcia:</label>
+        <input type="color" id="ppKeyColor" value="#00b140">
+        <label style="margin:0;font-size:12px;white-space:nowrap;">Tolerancja:</label>
+        <input type="range" id="ppSim" min="0.05" max="0.6" step="0.01" value="0.25" style="flex:1;min-width:60px;">
+        <span id="ppSimVal" style="font-size:12px;min-width:32px;">0.25</span>
+      </div>
+      <div style="margin-top:8px;">
+        <label>Plik tła (MP4):</label>
+        <input type="file" id="ppBgFile" accept="video/mp4,video/webm">
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button id="ppBgBtn">🔄 Zamień tło</button>
+      </div>
+      <div class="status" id="ppBgSt"></div>
+    </div>
+
+    <div class="pp-step" id="ppTitleStep" style="display:none;">
+      <div class="pp-h">🎞️ Krok 2 — Strona tytułowa (30 s)</div>
+      <div style="margin-top:4px;">
+        <label>Plik tytułowy (PNG / JPG / MP4):</label>
+        <input type="file" id="ppTitleFile" accept="image/png,image/jpeg,image/jpg,video/mp4">
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button id="ppTitleBtn">➕ Dodaj stronę tytułową</button>
+      </div>
+      <div class="status" id="ppTitleSt"></div>
+    </div>
+
+    <div class="pp-step" id="ppSaveStep" style="display:none;">
+      <div class="pp-h">💾 Krok 3 — Zapisz plik</div>
+      <div class="row">
+        <input type="text" id="ppName" class="pp-name" value="podcast_final">
+        <a id="ppDlBtn">⬇️ Pobierz MP4</a>
+      </div>
+    </div>
+
+  </div>
+
 </div>
 
 <script>
@@ -139,6 +205,7 @@
   const $=id=>document.getElementById(id);
   const pad=n=>String(n).padStart(2,'0');
   let stream, recorder, chunks=[], timerIv, t0;
+  let ppRecorded=null, ppBgDone=null, ppFinal=null, ffInst=null;
 
   // Streamlit Component API
   function toStreamlit(type, payload) {
@@ -319,7 +386,18 @@
       $('recordPhase').style.display = 'none';
       $('resultBox').style.display = 'block';
 
-      // Send to Streamlit
+      // Store blob for browser-side post-processing
+      ppRecorded = blob;
+      ppBgDone = null; ppFinal = null;
+      $('ppTitleStep').style.display = 'none';
+      $('ppSaveStep').style.display = 'none';
+      $('ppBgSt').textContent = '';
+      $('ppTitleSt').textContent = '';
+      $('ppDlBtn').style.display = 'none';
+      $('ppBox').style.display = 'block';
+      toStreamlit("streamlit:setFrameHeight", {height: document.body.scrollHeight + 40});
+
+      // Notify Streamlit (metadata only)
       toStreamlit("streamlit:setComponentValue", {
         value: {done: true, mime: recorder.mimeType || EXT, size: blob.size},
         dataType: "json"
@@ -343,16 +421,134 @@
 
   $('newBtn').onclick = async () => {
     $('resultBox').style.display = 'none';
+    $('ppBox').style.display = 'none';
     $('recordPhase').style.display = 'block';
     $('startBtn').disabled = false;
     $('timer').textContent = '00:00';
+    ppRecorded = null; ppBgDone = null; ppFinal = null;
     await startStream();
+    toStreamlit("streamlit:setFrameHeight", {height: document.body.scrollHeight + 40});
   };
 
   // Restart mic
-  $('restartMicBtn').onclick = async () => {
-    // ... (możesz zostawić lub usunąć – działa)
+  $('restartMicBtn').onclick = async () => {};
+
+  // ── Post-processing (FFmpeg.wasm, browser-side) ───────────────────────────
+  $('ppSim').oninput = () => { $('ppSimVal').textContent = parseFloat($('ppSim').value).toFixed(2); };
+  $('ppMethod').onchange = () => {
+    $('ppColorRow').style.display = $('ppMethod').value === 'chromakey' ? 'flex' : 'none';
   };
+
+  async function getFF(statusEl) {
+    if (ffInst && ffInst.isLoaded()) return ffInst;
+    if (!window.FFmpeg) {
+      statusEl.textContent = 'Ładuję FFmpeg.wasm (~30 MB, tylko raz)…';
+      await new Promise((res, rej) => {
+        const s = document.createElement('script');
+        s.src = 'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js';
+        s.onload = res; s.onerror = rej;
+        document.head.appendChild(s);
+      });
+    }
+    statusEl.textContent = 'Inicjalizuję FFmpeg.wasm…';
+    const {createFFmpeg} = FFmpeg;
+    ffInst = createFFmpeg({
+      log: false,
+      corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
+    });
+    await ffInst.load();
+    return ffInst;
+  }
+
+  $('ppBgBtn').onclick = async function() {
+    if (!ppRecorded) { $('ppBgSt').textContent = '⚠️ Brak nagrania.'; return; }
+    const bgFile = $('ppBgFile').files[0];
+    if (!bgFile) { $('ppBgSt').textContent = '⚠️ Wybierz plik tła.'; return; }
+    this.disabled = true;
+    try {
+      const ff = await getFF($('ppBgSt'));
+      const {fetchFile} = FFmpeg;
+      $('ppBgSt').textContent = 'Przetwarzam tło…';
+      const inExt = MIME.includes('mp4') ? 'mp4' : 'webm';
+      ff.FS('writeFile', 'inp.' + inExt, await fetchFile(ppRecorded));
+      ff.FS('writeFile', 'bg.mp4',       await fetchFile(bgFile));
+
+      let fc;
+      if ($('ppMethod').value === 'chromakey') {
+        const col = '0x' + $('ppKeyColor').value.replace('#','');
+        const sim = parseFloat($('ppSim').value).toFixed(2);
+        fc = `[0:v]chromakey=${col}:${sim}:0.05[fg];[1:v]scale=iw:ih[bg];[bg][fg]overlay[out]`;
+      } else {
+        fc = '[1:v]scale=iw:ih[bg];[bg][0:v]overlay[out]';
+      }
+      await ff.run('-i','inp.'+inExt,'-i','bg.mp4',
+        '-filter_complex',fc,'-map','[out]','-map','0:a?',
+        '-c:v','libx264','-crf','23','-preset','ultrafast',
+        '-c:a','aac','-shortest','bgout.mp4');
+
+      const d = ff.FS('readFile','bgout.mp4');
+      ppBgDone = new Blob([d.buffer], {type:'video/mp4'});
+      ['inp.'+inExt,'bg.mp4','bgout.mp4'].forEach(f=>{try{ff.FS('unlink',f);}catch(e){}});
+
+      $('ppBgSt').textContent = '✅ Tło zamienione!';
+      $('ppTitleStep').style.display = 'block';
+      $('ppSaveStep').style.display = 'block';
+      ppRefreshDl();
+      toStreamlit("streamlit:setFrameHeight", {height: document.body.scrollHeight + 40});
+    } catch(e) { $('ppBgSt').textContent = '❌ ' + e.message; }
+    this.disabled = false;
+  };
+
+  $('ppTitleBtn').onclick = async function() {
+    if (!ppBgDone) { $('ppTitleSt').textContent = '⚠️ Najpierw zamień tło (Krok 1).'; return; }
+    const tf = $('ppTitleFile').files[0];
+    if (!tf) { $('ppTitleSt').textContent = '⚠️ Wybierz plik tytułowy.'; return; }
+    this.disabled = true;
+    try {
+      const ff = await getFF($('ppTitleSt'));
+      const {fetchFile} = FFmpeg;
+      $('ppTitleSt').textContent = 'Przetwarzam stronę tytułową…';
+      const tExt = tf.name.split('.').pop().toLowerCase();
+      const isImg = ['png','jpg','jpeg'].includes(tExt);
+      ff.FS('writeFile','main.mp4', await fetchFile(ppBgDone));
+      ff.FS('writeFile','tsrc.'+tExt, await fetchFile(tf));
+
+      const titleArgs = isImg
+        ? ['-loop','1','-i','tsrc.'+tExt,'-f','lavfi','-i','anullsrc=cl=stereo:r=44100',
+           '-t','30','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest','title.mp4']
+        : ['-stream_loop','-1','-i','tsrc.'+tExt,'-f','lavfi','-i','anullsrc=cl=stereo:r=44100',
+           '-t','30','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest','title.mp4'];
+      await ff.run(...titleArgs);
+
+      ff.FS('writeFile','list.txt', new TextEncoder().encode("file 'title.mp4'\nfile 'main.mp4'\n"));
+      await ff.run('-f','concat','-safe','0','-i','list.txt',
+        '-c:v','libx264','-crf','23','-c:a','aac','final.mp4');
+
+      const d = ff.FS('readFile','final.mp4');
+      ppFinal = new Blob([d.buffer], {type:'video/mp4'});
+      ['main.mp4','tsrc.'+tExt,'title.mp4','list.txt','final.mp4']
+        .forEach(f=>{try{ff.FS('unlink',f);}catch(e){}});
+
+      $('ppTitleSt').textContent = '✅ Strona tytułowa dodana!';
+      ppRefreshDl();
+    } catch(e) { $('ppTitleSt').textContent = '❌ ' + e.message; }
+    this.disabled = false;
+  };
+
+  function ppRefreshDl() {
+    const blob = ppFinal || ppBgDone;
+    if (!blob) return;
+    const name = ($('ppName').value.trim() || 'podcast_final');
+    const url = URL.createObjectURL(blob);
+    const btn = $('ppDlBtn');
+    if (btn._url) URL.revokeObjectURL(btn._url);
+    btn._url = url; btn.href = url;
+    btn.download = name + '.mp4';
+    btn.textContent = '⬇️ Pobierz ' + name + '.mp4';
+    btn.style.display = 'inline-block';
+  }
+  $('ppName').oninput = ppRefreshDl;
+
 })();
 </script>
 </body>

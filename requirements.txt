@@ -9,5 +9,3 @@ pydub>=0.25
 requests>=2.31
 yt-dlp>=2024.1
 scipy>=1.12
-mediapipe>=0.10.0,<0.11
-opencv-python-headless>=4.9.0
