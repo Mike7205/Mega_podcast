@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <style>
   *{box-sizing:border-box;margin:0;padding:0;}
-  html,body{background:transparent;font-family:sans-serif;}
-  #wrap{background:rgba(20,10,5,0.88);border-radius:10px;padding:12px;color:#f0e0c8;}
+  html,body{background:transparent;font-family:sans-serif;width:100%;max-width:100%;overflow-x:hidden;}
+  #wrap{background:rgba(20,10,5,0.88);border-radius:10px;padding:12px;color:#f0e0c8;width:100%;max-width:100%;}
 
   #preview{width:100%;height:300px;border-radius:6px;background:#111;
            display:block;object-fit:cover;}
@@ -126,7 +126,7 @@
     );
   }
   toStreamlit("streamlit:componentReady", {apiVersion: 1});
-  toStreamlit("streamlit:setFrameHeight", {height: 660});
+  toStreamlit("streamlit:setFrameHeight", {height: 1000});
 
   // ── Best supported mime type ──────────────────────────────────────────
   const MIME = ['video/mp4;codecs=avc1,mp4a.40.2',
@@ -159,11 +159,14 @@
   }
 
   // ── Waveform meter ─────────────────────────────────────────────────────
-  let vuRaf, analyser, dataArr;
+  let vuRaf, analyser, dataArr, vuActx;
 
   function startVU(audioStream){
     if(vuRaf) cancelAnimationFrame(vuRaf);
+    if(vuActx && vuActx.state !== 'closed') vuActx.close();
     const actx = new (window.AudioContext||window.webkitAudioContext)();
+    vuActx = actx;
+    actx.resume().catch(()=>{});   // iframes need explicit resume even after user gesture
     const src  = actx.createMediaStreamSource(audioStream);
     analyser = actx.createAnalyser();
     analyser.fftSize = 512;
