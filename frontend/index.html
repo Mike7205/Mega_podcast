@@ -152,23 +152,9 @@
 
     <div class="pp-step">
       <div class="pp-h">🖼️ Krok 1 — Zamiana tła</div>
-      <div class="row">
-        <label style="margin:0;font-size:12px;white-space:nowrap;">Metoda:</label>
-        <select id="ppMethod" style="width:auto;flex:none;">
-          <option value="chromakey">🎨 Chromakey (jednolite tło)</option>
-          <option value="overlay">📽️ Tylko nałóż tło (bez usuwania)</option>
-        </select>
-      </div>
-      <div class="row" id="ppColorRow">
-        <label style="margin:0;font-size:12px;white-space:nowrap;">Kolor do usunięcia:</label>
-        <input type="color" id="ppKeyColor" value="#00b140">
-        <label style="margin:0;font-size:12px;white-space:nowrap;">Tolerancja:</label>
-        <input type="range" id="ppSim" min="0.05" max="0.6" step="0.01" value="0.25" style="flex:1;min-width:60px;">
-        <span id="ppSimVal" style="font-size:12px;min-width:32px;">0.25</span>
-      </div>
-      <div style="margin-top:8px;">
-        <label>Plik tła (MP4):</label>
-        <input type="file" id="ppBgFile" accept="video/mp4,video/webm">
+      <div style="margin-top:4px;">
+        <label>Plik tła (JPG / PNG / MP4):</label>
+        <input type="file" id="ppBgFile" accept="image/jpeg,image/png,image/jpg,video/mp4,video/webm">
       </div>
       <div class="row" style="margin-top:8px;">
         <button id="ppBgBtn">🔄 Zamień tło</button>
@@ -205,7 +191,7 @@
   const $=id=>document.getElementById(id);
   const pad=n=>String(n).padStart(2,'0');
   let stream, recorder, chunks=[], timerIv, t0;
-  let ppRecorded=null, ppBgDone=null, ppFinal=null, ffInst=null;
+  let ppRecorded=null, ppBgDone=null, ppFinal=null;
 
   // Streamlit Component API
   function toStreamlit(type, payload) {
@@ -433,31 +419,33 @@
   // Restart mic
   $('restartMicBtn').onclick = async () => {};
 
-  // ── Post-processing (FFmpeg.wasm, browser-side) ───────────────────────────
-  $('ppSim').oninput = () => { $('ppSimVal').textContent = parseFloat($('ppSim').value).toFixed(2); };
-  $('ppMethod').onchange = () => {
-    $('ppColorRow').style.display = $('ppMethod').value === 'chromakey' ? 'flex' : 'none';
-  };
+  // ── Post-processing (MediaPipe AI segmentation + Canvas, no WASM needed) ────
 
-  async function getFF(statusEl) {
-    if (ffInst && ffInst.isLoaded()) return ffInst;
-    if (!window.FFmpeg) {
-      statusEl.textContent = 'Ładuję FFmpeg.wasm (~30 MB, tylko raz)…';
-      await new Promise((res, rej) => {
-        const s = document.createElement('script');
-        s.src = 'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js';
-        s.onload = res; s.onerror = rej;
-        document.head.appendChild(s);
-      });
-    }
-    statusEl.textContent = 'Inicjalizuję FFmpeg.wasm…';
-    const {createFFmpeg} = FFmpeg;
-    ffInst = createFFmpeg({
-      log: false,
-      corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
+  async function loadScript(src) {
+    return new Promise((res, rej) => {
+      if (document.querySelector(`script[src="${src}"]`)) { res(); return; }
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = rej;
+      document.head.appendChild(s);
     });
-    await ffInst.load();
-    return ffInst;
+  }
+
+  async function loadSegmenter(statusEl) {
+    if (!window.SelfieSegmentation) {
+      statusEl.textContent = 'Ładuję MediaPipe AI (~15 MB, tylko raz)…';
+      await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/selfie_segmentation.js');
+    }
+    statusEl.textContent = 'Inicjalizuję model AI…';
+    const seg = new SelfieSegmentation({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/${f}`
+    });
+    seg.setOptions({modelSelection: 1, selfieMode: false});
+    return seg;
+  }
+
+  function makeMime() {
+    return ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']
+      .find(t => MediaRecorder.isTypeSupported(t)) || '';
   }
 
   $('ppBgBtn').onclick = async function() {
@@ -465,73 +453,179 @@
     const bgFile = $('ppBgFile').files[0];
     if (!bgFile) { $('ppBgSt').textContent = '⚠️ Wybierz plik tła.'; return; }
     this.disabled = true;
+    const st = $('ppBgSt');
     try {
-      const ff = await getFF($('ppBgSt'));
-      const {fetchFile} = FFmpeg;
-      $('ppBgSt').textContent = 'Przetwarzam tło…';
-      const inExt = MIME.includes('mp4') ? 'mp4' : 'webm';
-      ff.FS('writeFile', 'inp.' + inExt, await fetchFile(ppRecorded));
-      ff.FS('writeFile', 'bg.mp4',       await fetchFile(bgFile));
+      const seg = await loadSegmenter(st);
 
-      let fc;
-      if ($('ppMethod').value === 'chromakey') {
-        const col = '0x' + $('ppKeyColor').value.replace('#','');
-        const sim = parseFloat($('ppSim').value).toFixed(2);
-        fc = `[0:v]chromakey=${col}:${sim}:0.05[fg];[1:v]scale=iw:ih[bg];[bg][fg]overlay[out]`;
-      } else {
-        fc = '[1:v]scale=iw:ih[bg];[bg][0:v]overlay[out]';
-      }
-      await ff.run('-i','inp.'+inExt,'-i','bg.mp4',
-        '-filter_complex',fc,'-map','[out]','-map','0:a?',
-        '-c:v','libx264','-crf','23','-preset','ultrafast',
-        '-c:a','aac','-shortest','bgout.mp4');
+      // Load background (image or video)
+      const bgIsVid = bgFile.type.startsWith('video/');
+      const bgElem = bgIsVid ? document.createElement('video') : new Image();
+      bgElem.src = URL.createObjectURL(bgFile);
+      if (bgIsVid) { bgElem.loop = true; bgElem.muted = true; }
+      await new Promise(r => bgIsVid ? (bgElem.onloadedmetadata = r) : (bgElem.onload = r));
 
-      const d = ff.FS('readFile','bgout.mp4');
-      ppBgDone = new Blob([d.buffer], {type:'video/mp4'});
-      ['inp.'+inExt,'bg.mp4','bgout.mp4'].forEach(f=>{try{ff.FS('unlink',f);}catch(e){}});
+      // Source video
+      const vid = document.createElement('video');
+      vid.src = URL.createObjectURL(ppRecorded);
+      await new Promise(r => vid.onloadedmetadata = r);
+      const W = vid.videoWidth, H = vid.videoHeight;
 
-      $('ppBgSt').textContent = '✅ Tło zamienione!';
+      // Canvas for compositing
+      const canvas = document.createElement('canvas');
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext('2d');
+
+      // Temp canvases reused each frame
+      const pC = document.createElement('canvas'); pC.width=W; pC.height=H;
+      const pX = pC.getContext('2d');
+      const mC = document.createElement('canvas'); mC.width=W; mC.height=H;
+      const mX = mC.getContext('2d');
+
+      // Audio: pipe original video audio into output stream
+      const aCtx = new (window.AudioContext||window.webkitAudioContext)();
+      await aCtx.resume();
+      const vidSrc = aCtx.createMediaElementSource(vid);
+      const audioDst = aCtx.createMediaStreamDestination();
+      vidSrc.connect(audioDst);
+
+      const outStream = canvas.captureStream(30);
+      const aTrk = audioDst.stream.getAudioTracks()[0];
+      if (aTrk) outStream.addTrack(aTrk);
+
+      const mime = makeMime();
+      const rec = new MediaRecorder(outStream, mime ? {mimeType: mime} : {});
+      const chunks = [];
+      rec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+
+      st.textContent = 'Zamieniam tło… (czas ≈ czas nagrania)';
+
+      ppBgDone = await new Promise((resolve, reject) => {
+        rec.onstop = () => resolve(new Blob(chunks, {type: rec.mimeType||'video/webm'}));
+        rec.onerror = reject;
+
+        let latestResult = null;
+        seg.onResults = r => { latestResult = r; };
+
+        rec.start(200);
+        if (bgIsVid) bgElem.play();
+
+        vid.play().then(() => {
+          vid.onended = () => rec.stop();
+          function loop() {
+            if (vid.ended) return;
+            seg.send({image: vid}).then(() => {
+              if (latestResult) {
+                ctx.drawImage(bgElem, 0, 0, W, H);
+                pX.clearRect(0,0,W,H); pX.drawImage(latestResult.image, 0, 0, W, H);
+                mX.clearRect(0,0,W,H); mX.drawImage(latestResult.segmentationMask, 0, 0, W, H);
+                const pd = pX.getImageData(0,0,W,H);
+                const md = mX.getImageData(0,0,W,H);
+                for (let i=0; i<md.data.length; i+=4) pd.data[i+3] = md.data[i];
+                pX.putImageData(pd, 0, 0);
+                ctx.drawImage(pC, 0, 0);
+                latestResult = null;
+              }
+              requestAnimationFrame(loop);
+            });
+          }
+          requestAnimationFrame(loop);
+        }).catch(reject);
+      });
+
+      st.textContent = '✅ Tło zamienione!';
       $('ppTitleStep').style.display = 'block';
       $('ppSaveStep').style.display = 'block';
       ppRefreshDl();
       toStreamlit("streamlit:setFrameHeight", {height: document.body.scrollHeight + 40});
-    } catch(e) { $('ppBgSt').textContent = '❌ ' + e.message; }
+    } catch(e) { st.textContent = '❌ ' + e.message; }
     this.disabled = false;
   };
 
   $('ppTitleBtn').onclick = async function() {
-    if (!ppBgDone) { $('ppTitleSt').textContent = '⚠️ Najpierw zamień tło (Krok 1).'; return; }
-    const tf = $('ppTitleFile').files[0];
-    if (!tf) { $('ppTitleSt').textContent = '⚠️ Wybierz plik tytułowy.'; return; }
+    if (!ppBgDone) { $('ppTitleSt').textContent = '⚠️ Najpierw zamień tło.'; return; }
+    const tFile = $('ppTitleFile').files[0];
+    if (!tFile) { $('ppTitleSt').textContent = '⚠️ Wybierz plik okładki.'; return; }
     this.disabled = true;
+    const st = $('ppTitleSt');
+    st.textContent = 'Dodaję stronę tytułową…';
     try {
-      const ff = await getFF($('ppTitleSt'));
-      const {fetchFile} = FFmpeg;
-      $('ppTitleSt').textContent = 'Przetwarzam stronę tytułową…';
-      const tExt = tf.name.split('.').pop().toLowerCase();
-      const isImg = ['png','jpg','jpeg'].includes(tExt);
-      ff.FS('writeFile','main.mp4', await fetchFile(ppBgDone));
-      ff.FS('writeFile','tsrc.'+tExt, await fetchFile(tf));
+      const tIsVid = tFile.type.startsWith('video/');
+      const tElem = tIsVid ? document.createElement('video') : new Image();
+      tElem.src = URL.createObjectURL(tFile);
+      if (tIsVid) { tElem.loop = true; tElem.muted = true; }
+      await new Promise(r => tIsVid ? (tElem.onloadedmetadata = r) : (tElem.onload = r));
 
-      const titleArgs = isImg
-        ? ['-loop','1','-i','tsrc.'+tExt,'-f','lavfi','-i','anullsrc=cl=stereo:r=44100',
-           '-t','30','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest','title.mp4']
-        : ['-stream_loop','-1','-i','tsrc.'+tExt,'-f','lavfi','-i','anullsrc=cl=stereo:r=44100',
-           '-t','30','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest','title.mp4'];
-      await ff.run(...titleArgs);
+      const vid = document.createElement('video');
+      vid.src = URL.createObjectURL(ppBgDone);
+      await new Promise(r => vid.onloadedmetadata = r);
+      const W = vid.videoWidth, H = vid.videoHeight;
 
-      ff.FS('writeFile','list.txt', new TextEncoder().encode("file 'title.mp4'\nfile 'main.mp4'\n"));
-      await ff.run('-f','concat','-safe','0','-i','list.txt',
-        '-c:v','libx264','-crf','23','-c:a','aac','final.mp4');
+      const canvas = document.createElement('canvas');
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext('2d');
 
-      const d = ff.FS('readFile','final.mp4');
-      ppFinal = new Blob([d.buffer], {type:'video/mp4'});
-      ['main.mp4','tsrc.'+tExt,'title.mp4','list.txt','final.mp4']
-        .forEach(f=>{try{ff.FS('unlink',f);}catch(e){}});
+      // Audio: silent during title card, then video audio
+      const aCtx = new (window.AudioContext||window.webkitAudioContext)();
+      await aCtx.resume();
+      const vidSrc = aCtx.createMediaElementSource(vid);
+      const gain = aCtx.createGain(); gain.gain.value = 0;
+      vidSrc.connect(gain);
+      const audioDst = aCtx.createMediaStreamDestination();
+      gain.connect(audioDst);
 
-      $('ppTitleSt').textContent = '✅ Strona tytułowa dodana!';
+      const outStream = canvas.captureStream(30);
+      const aTrk = audioDst.stream.getAudioTracks()[0];
+      if (aTrk) outStream.addTrack(aTrk);
+
+      const mime = makeMime();
+      const rec = new MediaRecorder(outStream, mime ? {mimeType: mime} : {});
+      const chunks = [];
+      rec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+
+      ppFinal = await new Promise((resolve, reject) => {
+        rec.onstop = () => resolve(new Blob(chunks, {type: rec.mimeType||'video/webm'}));
+        rec.onerror = reject;
+        rec.start(200);
+        if (tIsVid) tElem.play();
+
+        const TITLE_MS = 30000;
+        const t0 = performance.now();
+
+        // Compute letterbox dimensions for title card
+        function drawTitle() {
+          ctx.fillStyle = '#000';
+          ctx.fillRect(0, 0, W, H);
+          const nw = tIsVid ? tElem.videoWidth  : tElem.naturalWidth;
+          const nh = tIsVid ? tElem.videoHeight : tElem.naturalHeight;
+          const ar = nw && nh ? nw/nh : W/H;
+          let tw = W, th = W/ar;
+          if (th > H) { th = H; tw = H*ar; }
+          ctx.drawImage(tElem, (W-tw)/2, (H-th)/2, tw, th);
+        }
+
+        function titlePhase() {
+          if (performance.now() - t0 >= TITLE_MS) {
+            gain.gain.setValueAtTime(1, aCtx.currentTime);
+            vid.play().then(() => {
+              vid.onended = () => rec.stop();
+              function vidPhase() {
+                if (vid.ended) return;
+                ctx.drawImage(vid, 0, 0, W, H);
+                requestAnimationFrame(vidPhase);
+              }
+              vidPhase();
+            }).catch(reject);
+            return;
+          }
+          drawTitle();
+          requestAnimationFrame(titlePhase);
+        }
+        titlePhase();
+      });
+
+      st.textContent = '✅ Strona tytułowa dodana!';
       ppRefreshDl();
-    } catch(e) { $('ppTitleSt').textContent = '❌ ' + e.message; }
+    } catch(e) { st.textContent = '❌ ' + e.message; }
     this.disabled = false;
   };
 
