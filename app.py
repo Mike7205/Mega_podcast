@@ -771,35 +771,28 @@ _VIDEO_REC_HTML = """
 
   // ── Start recording ───────────────────────────────────────────────────
   $('startBtn').onclick = function(){
-    // Guard: stream must be alive
-    if(!stream || !stream.active ||
-       stream.getTracks().filter(t=>t.readyState==='live').length===0){
-      $('status2').textContent='⚠ Strumień nieaktywny – odśwież stronę';
-      return;
-    }
     chunks=[];
 
-    // Build MediaRecorder — try MIME first, fall back to browser default
-    recorder = null;
-    const mimeList = MIME ? [MIME, ''] : [''];
-    for(const mime of mimeList){
+    // Build MediaRecorder — try with MIME, fall back to browser default
+    try{
+      const opts = MIME
+        ? {mimeType:MIME, videoBitsPerSecond:8_000_000, audioBitsPerSecond:256_000}
+        : {videoBitsPerSecond:8_000_000, audioBitsPerSecond:256_000};
+      recorder = new MediaRecorder(stream, opts);
+    }catch(e1){
       try{
-        const opts = {videoBitsPerSecond:8_000_000, audioBitsPerSecond:256_000};
-        if(mime) opts.mimeType = mime;
-        recorder = new MediaRecorder(stream, opts);
-        break;
-      }catch(_){ recorder = null; }
-    }
-    if(!recorder){
-      $('status2').textContent='⚠ MediaRecorder niedostępny w tej przeglądarce';
-      return;
+        recorder = new MediaRecorder(stream);
+      }catch(e2){
+        $('status2').textContent='⚠ MediaRecorder błąd: '+e2.message;
+        return;
+      }
     }
 
-    // Surface errors to the user instead of silently firing onstop
+    // Surface codec/permission errors instead of silently firing onstop
     recorder.onerror = ev=>{
+      clearInterval(timerIv);
       const msg = (ev.error && ev.error.message) ? ev.error.message : String(ev);
       $('status2').textContent='⚠ Błąd nagrywania: '+msg;
-      clearInterval(timerIv);
       $('startBtn').disabled=false;
       $('stopBtn').disabled=true;
     };
@@ -810,10 +803,8 @@ _VIDEO_REC_HTML = """
 
     recorder.onstop = ()=>{
       clearInterval(timerIv);
-      // If no data arrived the recorder failed immediately — tell the user
       if(chunks.length===0){
-        $('status2').textContent=
-          '⚠ Brak danych – spróbuj ponownie lub użyj Chrome/Firefox';
+        $('status2').textContent='⚠ Brak danych – kliknij Nagraj ponownie lub zmień przeglądarkę';
         $('startBtn').disabled=false;
         $('stopBtn').disabled=true;
         return;
@@ -822,7 +813,6 @@ _VIDEO_REC_HTML = """
       const url=URL.createObjectURL(blob);
       $('playback').src=url;
       $('dlBtn').href=url;
-      // update download name live when user edits the field
       function refreshDl(){
         const name=($('fname').value.trim()||'nagranie_av').replace(/\\.[^.]+$/,'');
         $('dlBtn').download=name+'.'+EXT;
@@ -836,13 +826,7 @@ _VIDEO_REC_HTML = """
       $('resultBox').style.display='block';
     };
 
-    try{
-      recorder.start(1000);   // 1 s timeslice — bardziej kompatybilny niż 200 ms
-    }catch(e){
-      $('status2').textContent='⚠ Nie można rozpocząć: '+e.message;
-      return;
-    }
-
+    recorder.start(200);
     t0=Date.now();
     timerIv=setInterval(()=>{
       const s=Math.floor((Date.now()-t0)/1000);
@@ -850,7 +834,7 @@ _VIDEO_REC_HTML = """
     },500);
     $('startBtn').disabled=true;
     $('stopBtn').disabled=false;
-    $('status2').textContent='🔴 Nagrywanie…';
+    $('status2').textContent='🔴 Nagrywa… kliknij ■ Stop aby zakończyć';
   };
 
   // ── Stop recording ────────────────────────────────────────────────────
