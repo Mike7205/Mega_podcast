@@ -557,7 +557,14 @@
 
       const vid = document.createElement('video');
       vid.src = URL.createObjectURL(ppBgDone);
+      vid.muted = true; // muted = can autoplay without gesture
       await new Promise(r => vid.onloadedmetadata = r);
+
+      // Unlock playback NOW while we're in user-gesture context
+      await vid.play();
+      vid.pause();
+      vid.currentTime = 0;
+
       const W = vid.videoWidth, H = vid.videoHeight;
 
       const canvas = document.createElement('canvas');
@@ -568,6 +575,8 @@
       const aCtx = new (window.AudioContext||window.webkitAudioContext)();
       await aCtx.resume();
       const vidSrc = aCtx.createMediaElementSource(vid);
+      // createMediaElementSource takes over audio — unmute so gain node controls volume
+      vid.muted = false;
       const gain = aCtx.createGain(); gain.gain.value = 0;
       vidSrc.connect(gain);
       const audioDst = aCtx.createMediaStreamDestination();
@@ -605,16 +614,16 @@
 
         function titlePhase() {
           if (performance.now() - t0 >= TITLE_MS) {
+            // vid already unlocked — play() will succeed outside gesture context
             gain.gain.setValueAtTime(1, aCtx.currentTime);
-            vid.play().then(() => {
-              vid.onended = () => rec.stop();
-              function vidPhase() {
-                if (vid.ended) return;
-                ctx.drawImage(vid, 0, 0, W, H);
-                requestAnimationFrame(vidPhase);
-              }
-              vidPhase();
-            }).catch(reject);
+            vid.addEventListener('ended', () => rec.stop(), {once: true});
+            vid.play().catch(reject);
+            function vidPhase() {
+              if (vid.ended) return;
+              ctx.drawImage(vid, 0, 0, W, H);
+              requestAnimationFrame(vidPhase);
+            }
+            vidPhase();
             return;
           }
           drawTitle();
