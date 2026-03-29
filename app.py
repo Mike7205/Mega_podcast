@@ -388,24 +388,24 @@ def show_player(y: np.ndarray, sr: int, title: str = "",
 </script>
 """
     #st.components.v1.html(html, height=1450)
-        else:
-        st.info(
-            "Nagrywa kamerę + mikrofon bezpośrednio w przeglądarce. "
-            "Po zakończeniu pobierz plik MP4/WebM przyciskiem poniżej.",
-            icon="🎥",
+else:
+    st.info(
+        "Nagrywa kamerę + mikrofon bezpośrednio w przeglądarce. "
+        "Po zakończeniu pobierz plik MP4/WebM przyciskiem poniżej.",
+        icon="🎥",
+    )
+    
+    # Okienko nagrywania — 90% szerokości strony, wyśrodkowane
+    col1, col2, col3 = st.columns([1, 9, 1])
+    with col2:
+        st.components.v1.html(
+            _VIDEO_REC_HTML,     # ← Twój duży string z HTML + JS
+            height=720,          # zwiększona wysokość
+            scrolling=True
         )
-        
-        # Okienko nagrywania — 90% szerokości strony, wyśrodkowane
-        col1, col2, col3 = st.columns([1, 9, 1])
-        with col2:
-            st.components.v1.html(
-                _VIDEO_REC_HTML,     # ← Twój duży string z HTML + JS
-                height=720,          # zwiększona wysokość
-                scrolling=True
-            )
-        
-        # Komunikat po zakończeniu nagrywania (tymczasowy, dopóki nie przejdziesz na declare_component)
-        st.caption("✅ Po nagraniu plik powinien pojawić się do pobrania w przeglądarce.")
+    
+    # Komunikat po zakończeniu nagrywania (tymczasowy, dopóki nie przejdziesz na declare_component)
+    st.caption("✅ Po nagraniu plik powinien pojawić się do pobrania w przeglądarce.")
 
 
 # ─── Processing ───────────────────────────────────────────────────────────────
