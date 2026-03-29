@@ -193,7 +193,7 @@
 
     function draw(){
       vuRaf = requestAnimationFrame(draw);
-      canvas.width = canvas.offsetWidth;
+      canvas.width = canvas.offsetWidth || canvas.parentElement?.offsetWidth || 640;
       const W = canvas.width, H = canvas.height;
       analyser.getByteTimeDomainData(dataArr);
       c.fillStyle = '#1c1c1e';
