@@ -549,19 +549,22 @@
     const st = $('ppTitleSt');
     st.textContent = 'Dodaję stronę tytułową…';
     try {
+      // MUST unlock vid.play() SYNCHRONOUSLY — user gesture context expires after first await
+      const vid = document.createElement('video');
+      vid.src = URL.createObjectURL(ppBgDone);
+      vid.muted = true;
+      vid.play().catch(()=>{}); // activate element now, while gesture is still active
+      vid.pause();
+
       const tIsVid = tFile.type.startsWith('video/');
       const tElem = tIsVid ? document.createElement('video') : new Image();
       tElem.src = URL.createObjectURL(tFile);
       if (tIsVid) { tElem.loop = true; tElem.muted = true; }
-      await new Promise(r => tIsVid ? (tElem.onloadedmetadata = r) : (tElem.onload = r));
 
-      const vid = document.createElement('video');
-      vid.src = URL.createObjectURL(ppBgDone);
-      vid.muted = true; // muted = can autoplay without gesture
-      await new Promise(r => vid.onloadedmetadata = r);
-
-      // Unlock playback NOW while we're in user-gesture context
-      await vid.play();
+      await Promise.all([
+        new Promise(r => tIsVid ? (tElem.onloadedmetadata = r) : (tElem.onload = r)),
+        new Promise(r => vid.readyState >= 1 ? r() : (vid.onloadedmetadata = r))
+      ]);
       vid.pause();
       vid.currentTime = 0;
 
@@ -571,11 +574,10 @@
       canvas.width = W; canvas.height = H;
       const ctx = canvas.getContext('2d');
 
-      // Audio: silent during title card, then video audio
       const aCtx = new (window.AudioContext||window.webkitAudioContext)();
       await aCtx.resume();
       const vidSrc = aCtx.createMediaElementSource(vid);
-      // createMediaElementSource takes over audio — unmute so gain node controls volume
+      // muted=false so MediaElementAudioSourceNode produces signal (muted=true → silence)
       vid.muted = false;
       const gain = aCtx.createGain(); gain.gain.value = 0;
       vidSrc.connect(gain);
