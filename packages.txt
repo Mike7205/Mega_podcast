@@ -2,3 +2,5 @@ libportaudio2
 libportaudiocpp0
 portaudio19-dev
 ffmpeg
+libgl1-mesa-glx
+libglib2.0-0

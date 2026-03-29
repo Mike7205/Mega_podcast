@@ -6,6 +6,7 @@ Optimised for FSDZMIC S338 USB microphone.
 
 import base64
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -177,6 +178,10 @@ for k, v in {
     "mic_key":          0,
     "edit_src_override": None,  # force source selection from button
     "_upload_sig":       None,  # (name, size) to avoid re-processing on rerun
+    "pp_vid_key":        None,  # (name, size) of uploaded recorded video
+    "pp_vid_bytes":      None,  # raw bytes of uploaded recorded video
+    "pp_vid_bg":         None,  # bytes after background replacement
+    "pp_vid_final":      None,  # bytes after title card added
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -394,6 +399,123 @@ def show_player(y: np.ndarray, sr: int, title: str = "",
     st.components.v1.html(html, height=1450)
 
 
+# ─── Video post-processing ───────────────────────────────────────────────────
+
+def replace_video_background(vid_bytes: bytes, bg_bytes: bytes) -> bytes:
+    """Replace video background using MediaPipe selfie segmentation + ffmpeg."""
+    import cv2
+    import mediapipe as mp
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        vid_path      = os.path.join(tmpdir, "input.mp4")
+        bg_path       = os.path.join(tmpdir, "bg.mp4")
+        noaudio_path  = os.path.join(tmpdir, "noaudio.mp4")
+        out_path      = os.path.join(tmpdir, "output.mp4")
+
+        with open(vid_path, "wb") as f:
+            f.write(vid_bytes)
+        with open(bg_path, "wb") as f:
+            f.write(bg_bytes)
+
+        cap    = cv2.VideoCapture(vid_path)
+        fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        W      = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        H      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        bg_cap = cv2.VideoCapture(bg_path)
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(noaudio_path, fourcc, fps, (W, H))
+
+        with mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1) as seg:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                ret_bg, bg_frame = bg_cap.read()
+                if not ret_bg:
+                    bg_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    _, bg_frame = bg_cap.read()
+                if bg_frame is None:
+                    bg_frame = np.zeros((H, W, 3), dtype=np.uint8)
+                else:
+                    bg_frame = cv2.resize(bg_frame, (W, H))
+
+                rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mask = seg.process(rgb).segmentation_mask        # float32 0..1
+                m3   = np.dstack([mask] * 3)
+                out_frame = (frame * m3 + bg_frame * (1 - m3)).astype(np.uint8)
+                writer.write(out_frame)
+
+        cap.release()
+        bg_cap.release()
+        writer.release()
+
+        # Mux audio from original video
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", noaudio_path, "-i", vid_path,
+            "-map", "0:v", "-map", "1:a?",
+            "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+            "-c:a", "aac",
+            "-shortest", out_path,
+        ], check=True, capture_output=True)
+
+        return open(out_path, "rb").read()
+
+
+def add_title_card(vid_bytes: bytes, title_file, duration: int = 30) -> bytes:
+    """Prepend a title card (image PNG/JPG or video MP4) for `duration` seconds."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        main_path   = os.path.join(tmpdir, "main.mp4")
+        title_src   = os.path.join(tmpdir, "title_src" + Path(title_file.name).suffix)
+        title_vid   = os.path.join(tmpdir, "title.mp4")
+        concat_list = os.path.join(tmpdir, "list.txt")
+        out_path    = os.path.join(tmpdir, "output.mp4")
+
+        with open(main_path, "wb") as f:
+            f.write(vid_bytes)
+        title_file.seek(0)
+        with open(title_src, "wb") as f:
+            f.write(title_file.read())
+
+        # Detect main video dimensions
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", main_path],
+            capture_output=True, text=True, check=True,
+        )
+        vs  = next(s for s in json.loads(probe.stdout)["streams"] if s["codec_type"] == "video")
+        W, H = vs["width"], vs["height"]
+        scale = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                 f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1")
+
+        suffix = Path(title_file.name).suffix.lower()
+        base_cmd = [
+            "ffmpeg", "-y",
+            *((["-loop", "1"] if suffix in (".png", ".jpg", ".jpeg") else ["-stream_loop", "-1"])),
+            "-i", title_src,
+            "-f", "lavfi", "-i", "anullsrc=cl=stereo:r=44100",
+            "-t", str(duration),
+            "-vf", scale,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest",
+            title_vid,
+        ]
+        subprocess.run(base_cmd, check=True, capture_output=True)
+
+        with open(concat_list, "w") as f:
+            f.write(f"file '{title_vid}'\nfile '{main_path}'\n")
+
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0", "-i", concat_list,
+            "-c:v", "libx264", "-crf", "23",
+            "-c:a", "aac",
+            out_path,
+        ], check=True, capture_output=True)
+
+        return open(out_path, "rb").read()
+
+
 # ─── Processing ───────────────────────────────────────────────────────────────
 
 def _shelf(y: np.ndarray, sr: int, freq: float, gain_db: float, btype: str) -> np.ndarray:
@@ -583,6 +705,70 @@ with tab_rec:
 
         # Komunikat po zakończeniu nagrywania (tymczasowy, dopóki nie przejdziesz na declare_component)
         st.caption("✅ Po nagraniu plik powinien pojawić się do pobrania w przeglądarce.")
+
+        # ── Post-processing wideo ─────────────────────────────────────────────
+        st.divider()
+        st.subheader("🎬 Post-processing wideo")
+
+        up_rec = st.file_uploader(
+            "📹 Krok 1 — Wgraj nagrane wideo",
+            type=["mp4", "webm", "mov"],
+            key="pp_vid",
+        )
+        if up_rec:
+            vid_key = (up_rec.name, up_rec.size)
+            if st.session_state.pp_vid_key != vid_key:
+                st.session_state.pp_vid_bytes = up_rec.read()
+                st.session_state.pp_vid_key   = vid_key
+                st.session_state.pp_vid_bg    = None
+                st.session_state.pp_vid_final = None
+
+        if st.session_state.pp_vid_bytes:
+            # ── Krok 2: zamiana tła ──────────────────────────────────────────
+            st.markdown("##### 🖼️ Krok 2 — Zamiana tła")
+            up_bg = st.file_uploader("Wgraj tło (plik MP4)", type=["mp4"], key="pp_bg")
+            if up_bg:
+                if st.button("🔄 Zamień tło", key="btn_bg"):
+                    with st.spinner("Zamieniam tło… może potrwać kilka minut"):
+                        try:
+                            st.session_state.pp_vid_bg = replace_video_background(
+                                st.session_state.pp_vid_bytes, up_bg.read()
+                            )
+                            st.session_state.pp_vid_final = None
+                            st.success("✅ Tło zamienione!")
+                        except Exception as e:
+                            st.error(f"Błąd zamiany tła: {e}")
+
+            if st.session_state.pp_vid_bg:
+                # ── Krok 3: strona tytułowa ──────────────────────────────────
+                st.markdown("##### 🎞️ Krok 3 — Strona tytułowa (30 s)")
+                up_title = st.file_uploader(
+                    "Wgraj stronę tytułową (PNG / JPG / MP4)",
+                    type=["png", "jpg", "jpeg", "mp4"],
+                    key="pp_title",
+                )
+                if up_title:
+                    if st.button("➕ Dodaj stronę tytułową", key="btn_title"):
+                        with st.spinner("Dodaję stronę tytułową…"):
+                            try:
+                                st.session_state.pp_vid_final = add_title_card(
+                                    st.session_state.pp_vid_bg, up_title
+                                )
+                                st.success("✅ Strona tytułowa dodana!")
+                            except Exception as e:
+                                st.error(f"Błąd strony tytułowej: {e}")
+
+                # ── Krok 4: zapis ────────────────────────────────────────────
+                st.markdown("##### 💾 Krok 4 — Zapisz gotowy plik")
+                final_bytes = st.session_state.pp_vid_final or st.session_state.pp_vid_bg
+                vid_fname   = st.text_input("Nazwa pliku", "podcast_final", key="pp_fname")
+                st.download_button(
+                    "⬇️ Pobierz gotowy MP4",
+                    data=final_bytes,
+                    file_name=f"{vid_fname}.mp4",
+                    mime="video/mp4",
+                    key="dl_final_vid",
+                )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 – EDIT & EXPORT
