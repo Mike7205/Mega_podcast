@@ -493,6 +493,10 @@
       // Audio: pipe original video audio into output stream
       const aCtx = new (window.AudioContext||window.webkitAudioContext)();
       await aCtx.resume();
+      // Keep-alive: Chrome suspends contexts that only output to MediaStreamDestination
+      const _ka1 = aCtx.createOscillator(), _sl1 = aCtx.createGain();
+      _sl1.gain.value = 0; _ka1.connect(_sl1); _sl1.connect(aCtx.destination); _ka1.start();
+      aCtx.onstatechange = () => { if (aCtx.state === 'suspended') aCtx.resume().catch(()=>{}); };
       const vidSrc = aCtx.createMediaElementSource(vid);
       const audioDst = aCtx.createMediaStreamDestination();
       vidSrc.connect(audioDst);
@@ -536,7 +540,6 @@
                 for (let i=0; i<md.data.length; i+=4) pd.data[i+3] = md.data[i];
                 pX.putImageData(pd, 0, 0);
                 ctx.drawImage(pC, 0, 0);
-                latestResult = null;
               } else {
                 // MediaPipe not ready yet — draw raw video so stream has real frames
                 ctx.drawImage(vid, 0, 0, W, H);
@@ -609,6 +612,10 @@
       // independently of the muted attribute.
       const aCtx = new (window.AudioContext || window.webkitAudioContext)();
       await aCtx.resume();
+      // Keep-alive: prevent Chrome from suspending the context during the 30s silent title phase
+      const _ka2 = aCtx.createOscillator(), _sl2 = aCtx.createGain();
+      _sl2.gain.value = 0; _ka2.connect(_sl2); _sl2.connect(aCtx.destination); _ka2.start();
+      aCtx.onstatechange = () => { if (aCtx.state === 'suspended') aCtx.resume().catch(()=>{}); };
       const vidSrc = aCtx.createMediaElementSource(vid);
       const gain = aCtx.createGain();
       gain.gain.value = 0;          // silent during title card
