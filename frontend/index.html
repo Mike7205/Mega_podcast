@@ -203,10 +203,9 @@
   toStreamlit("streamlit:setFrameHeight", {height: 720});
 
   // Best supported mime type
-  const MIME = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4',
-                'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+  const MIME = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
     .find(t=>MediaRecorder.isTypeSupported(t)) || '';
-  const EXT  = MIME.includes('mp4') ? 'mp4' : 'webm';
+  const EXT  = 'webm';
 
   // Populate devices
   async function enumDevices(){
