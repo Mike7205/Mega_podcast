@@ -549,37 +549,47 @@
     const st = $('ppTitleSt');
     st.textContent = 'Dodaję stronę tytułową…';
     try {
-      // MUST unlock vid.play() SYNCHRONOUSLY — user gesture context expires after first await
       const vid = document.createElement('video');
       vid.src = URL.createObjectURL(ppBgDone);
+      // KEEP muted=true throughout: muted elements are exempt from autoplay restrictions.
+      // vid.muted does NOT affect MediaElementAudioSourceNode — audio flows through
+      // the Web Audio gain node regardless.
       vid.muted = true;
-      vid.play().catch(()=>{}); // activate element now, while gesture is still active
-      vid.pause();
 
       const tIsVid = tFile.type.startsWith('video/');
       const tElem = tIsVid ? document.createElement('video') : new Image();
-      tElem.src = URL.createObjectURL(tFile);
       if (tIsVid) { tElem.loop = true; tElem.muted = true; }
+      tElem.src = URL.createObjectURL(tFile);
 
+      // Load both elements before doing anything async
       await Promise.all([
-        new Promise(r => tIsVid ? (tElem.onloadedmetadata = r) : (tElem.onload = r)),
-        new Promise(r => vid.readyState >= 1 ? r() : (vid.onloadedmetadata = r))
+        new Promise((r, rej) => {
+          if (tIsVid) { tElem.onloadedmetadata = r; tElem.onerror = rej; }
+          else        { tElem.onload = r;            tElem.onerror = rej; }
+        }),
+        new Promise((r, rej) => {
+          if (vid.readyState >= 1) { r(); return; }
+          vid.onloadedmetadata = r;
+          vid.onerror = rej;
+        })
       ]);
-      vid.pause();
       vid.currentTime = 0;
 
       const W = vid.videoWidth, H = vid.videoHeight;
+      if (!W || !H) throw new Error('Nie można odczytać rozdzielczości nagrania.');
 
       const canvas = document.createElement('canvas');
       canvas.width = W; canvas.height = H;
       const ctx = canvas.getContext('2d');
 
-      const aCtx = new (window.AudioContext||window.webkitAudioContext)();
+      // Web Audio: route video audio through gain node so we control silence/sound.
+      // vid.muted=true is irrelevant here — MediaElementAudioSourceNode captures audio
+      // independently of the muted attribute.
+      const aCtx = new (window.AudioContext || window.webkitAudioContext)();
       await aCtx.resume();
       const vidSrc = aCtx.createMediaElementSource(vid);
-      // muted=false so MediaElementAudioSourceNode produces signal (muted=true → silence)
-      vid.muted = false;
-      const gain = aCtx.createGain(); gain.gain.value = 0;
+      const gain = aCtx.createGain();
+      gain.gain.value = 0;          // silent during title card
       vidSrc.connect(gain);
       const audioDst = aCtx.createMediaStreamDestination();
       gain.connect(audioDst);
@@ -594,31 +604,37 @@
       rec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
 
       ppFinal = await new Promise((resolve, reject) => {
-        rec.onstop = () => resolve(new Blob(chunks, {type: rec.mimeType||'video/webm'}));
+        rec.onstop = () => resolve(new Blob(chunks, {type: rec.mimeType || 'video/webm'}));
         rec.onerror = reject;
         rec.start(200);
-        if (tIsVid) tElem.play();
+        if (tIsVid) tElem.play().catch(() => {});
 
         const TITLE_MS = 30000;
         const t0 = performance.now();
 
-        // Compute letterbox dimensions for title card
         function drawTitle() {
           ctx.fillStyle = '#000';
           ctx.fillRect(0, 0, W, H);
           const nw = tIsVid ? tElem.videoWidth  : tElem.naturalWidth;
           const nh = tIsVid ? tElem.videoHeight : tElem.naturalHeight;
-          const ar = nw && nh ? nw/nh : W/H;
-          let tw = W, th = W/ar;
-          if (th > H) { th = H; tw = H*ar; }
-          ctx.drawImage(tElem, (W-tw)/2, (H-th)/2, tw, th);
+          const ar = (nw && nh) ? nw / nh : W / H;
+          let tw = W, th = W / ar;
+          if (th > H) { th = H; tw = H * ar; }
+          ctx.drawImage(tElem, (W - tw) / 2, (H - th) / 2, tw, th);
         }
 
         function titlePhase() {
-          if (performance.now() - t0 >= TITLE_MS) {
-            // vid already unlocked — play() will succeed outside gesture context
-            gain.gain.setValueAtTime(1, aCtx.currentTime);
+          const elapsed = performance.now() - t0;
+
+          // Update countdown every ~500 ms via DOM (safe from rAF)
+          const secsLeft = Math.max(0, Math.ceil((TITLE_MS - elapsed) / 1000));
+          st.textContent = `🎞️ Strona tytułowa… ${secsLeft}s`;
+
+          if (elapsed >= TITLE_MS) {
+            st.textContent = '⏳ Doklejam nagranie…';
+            gain.gain.setValueAtTime(1, aCtx.currentTime);  // unmute audio
             vid.addEventListener('ended', () => rec.stop(), {once: true});
+            // vid.muted=true → autoplay allowed without gesture even after awaits
             vid.play().catch(reject);
             function vidPhase() {
               if (vid.ended) return;
