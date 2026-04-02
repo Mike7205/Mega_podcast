@@ -449,6 +449,7 @@
       locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/${f}`
     });
     seg.setOptions({modelSelection: 1, selfieMode: false});
+    await seg.initialize();   // pre-load WASM model so first send() is synchronous
     return seg;
   }
 
@@ -463,6 +464,13 @@
     if (!bgFile) { $('ppBgSt').textContent = '⚠️ Wybierz plik tła.'; return; }
     this.disabled = true;
     const st = $('ppBgSt');
+    // Create AudioContext HERE — while still inside the user-gesture handler,
+    // BEFORE any await. Chrome blocks resume() after async gaps.
+    const aCtx = new (window.AudioContext||window.webkitAudioContext)();
+    aCtx.resume().catch(()=>{});
+    const _ka1 = aCtx.createOscillator(), _sl1 = aCtx.createGain();
+    _sl1.gain.value = 0; _ka1.connect(_sl1); _sl1.connect(aCtx.destination); _ka1.start();
+    aCtx.onstatechange = () => { if (aCtx.state === 'suspended') aCtx.resume().catch(()=>{}); };
     try {
       const seg = await loadSegmenter(st);
 
@@ -489,14 +497,6 @@
       const pX = pC.getContext('2d');
       const mC = document.createElement('canvas'); mC.width=W; mC.height=H;
       const mX = mC.getContext('2d');
-
-      // Audio: pipe original video audio into output stream
-      const aCtx = new (window.AudioContext||window.webkitAudioContext)();
-      await aCtx.resume();
-      // Keep-alive: Chrome suspends contexts that only output to MediaStreamDestination
-      const _ka1 = aCtx.createOscillator(), _sl1 = aCtx.createGain();
-      _sl1.gain.value = 0; _ka1.connect(_sl1); _sl1.connect(aCtx.destination); _ka1.start();
-      aCtx.onstatechange = () => { if (aCtx.state === 'suspended') aCtx.resume().catch(()=>{}); };
       const vidSrc = aCtx.createMediaElementSource(vid);
       const audioDst = aCtx.createMediaStreamDestination();
       vidSrc.connect(audioDst);
@@ -545,6 +545,10 @@
                 ctx.drawImage(vid, 0, 0, W, H);
               }
               requestAnimationFrame(loop);
+            }).catch(() => {
+              // MediaPipe error — keep loop alive with raw frame fallback
+              ctx.drawImage(vid, 0, 0, W, H);
+              requestAnimationFrame(loop);
             });
           }
           requestAnimationFrame(loop);
@@ -567,6 +571,12 @@
     this.disabled = true;
     const st = $('ppTitleSt');
     st.textContent = 'Dodaję stronę tytułową…';
+    // Create AudioContext BEFORE any await — user-gesture context is still active here.
+    const aCtx = new (window.AudioContext || window.webkitAudioContext)();
+    aCtx.resume().catch(()=>{});
+    const _ka2 = aCtx.createOscillator(), _sl2 = aCtx.createGain();
+    _sl2.gain.value = 0; _ka2.connect(_sl2); _sl2.connect(aCtx.destination); _ka2.start();
+    aCtx.onstatechange = () => { if (aCtx.state === 'suspended') aCtx.resume().catch(()=>{}); };
     try {
       if (!ppBgDone || ppBgDone.size === 0) throw new Error('Nagranie po zamianie tła jest puste — wykonaj krok 1 ponownie.');
 
@@ -610,12 +620,6 @@
       // Web Audio: route video audio through gain node so we control silence/sound.
       // vid.muted=true is irrelevant here — MediaElementAudioSourceNode captures audio
       // independently of the muted attribute.
-      const aCtx = new (window.AudioContext || window.webkitAudioContext)();
-      await aCtx.resume();
-      // Keep-alive: prevent Chrome from suspending the context during the 30s silent title phase
-      const _ka2 = aCtx.createOscillator(), _sl2 = aCtx.createGain();
-      _sl2.gain.value = 0; _ka2.connect(_sl2); _sl2.connect(aCtx.destination); _ka2.start();
-      aCtx.onstatechange = () => { if (aCtx.state === 'suspended') aCtx.resume().catch(()=>{}); };
       const vidSrc = aCtx.createMediaElementSource(vid);
       const gain = aCtx.createGain();
       gain.gain.value = 0;          // silent during title card
