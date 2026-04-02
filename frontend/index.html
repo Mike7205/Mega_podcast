@@ -564,13 +564,13 @@
       // Load both elements before doing anything async
       await Promise.all([
         new Promise((r, rej) => {
-          if (tIsVid) { tElem.onloadedmetadata = r; tElem.onerror = rej; }
-          else        { tElem.onload = r;            tElem.onerror = rej; }
+          if (tIsVid) { tElem.onloadedmetadata = r; tElem.onerror = () => rej(new Error('Nie można załadować pliku tytułowego: ' + tFile.name)); }
+          else        { tElem.onload = r;            tElem.onerror = () => rej(new Error('Nie można załadować obrazu tytułowego: ' + tFile.name)); }
         }),
         new Promise((r, rej) => {
           if (vid.readyState >= 1) { r(); return; }
           vid.onloadedmetadata = r;
-          vid.onerror = rej;
+          vid.onerror = () => rej(new Error('Nie można załadować nagrania po zamianie tła'));
         })
       ]);
       vid.currentTime = 0;
@@ -605,7 +605,7 @@
 
       ppFinal = await new Promise((resolve, reject) => {
         rec.onstop = () => resolve(new Blob(chunks, {type: rec.mimeType || 'video/webm'}));
-        rec.onerror = reject;
+        rec.onerror = ev => reject(new Error(ev.error?.message || 'Błąd nagrywania (MediaRecorder)'));
         rec.start(200);
         if (tIsVid) tElem.play().catch(() => {});
 
@@ -652,7 +652,7 @@
 
       st.textContent = '✅ Strona tytułowa dodana!';
       ppRefreshDl();
-    } catch(e) { st.textContent = '❌ ' + e.message; }
+    } catch(e) { st.textContent = '❌ ' + (e instanceof Error ? e.message : String(e)); }
     this.disabled = false;
   };
 
