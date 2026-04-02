@@ -515,6 +515,10 @@
         let latestResult = null;
         seg.onResults = r => { latestResult = r; };
 
+        // Prime the canvas so captureStream has at least one frame before recording starts
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, W, H);
+
         rec.start(200);
         if (bgIsVid) bgElem.play();
 
@@ -533,6 +537,9 @@
                 pX.putImageData(pd, 0, 0);
                 ctx.drawImage(pC, 0, 0);
                 latestResult = null;
+              } else {
+                // MediaPipe not ready yet — draw raw video so stream has real frames
+                ctx.drawImage(vid, 0, 0, W, H);
               }
               requestAnimationFrame(loop);
             });
