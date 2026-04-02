@@ -501,7 +501,7 @@
 
       ppBgDone = await new Promise((resolve, reject) => {
         rec.onstop = () => resolve(new Blob(chunks, {type: rec.mimeType||'video/webm'}));
-        rec.onerror = reject;
+        rec.onerror = ev => reject(new Error(ev.error?.message || 'Błąd nagrywania tła (MediaRecorder)'));
 
         let latestResult = null;
         seg.onResults = r => { latestResult = r; };
@@ -549,12 +549,14 @@
     const st = $('ppTitleSt');
     st.textContent = 'Dodaję stronę tytułową…';
     try {
+      if (!ppBgDone || ppBgDone.size === 0) throw new Error('Nagranie po zamianie tła jest puste — wykonaj krok 1 ponownie.');
+
+      // Set muted BEFORE src so autoplay exemption is in place from the start.
       const vid = document.createElement('video');
-      vid.src = URL.createObjectURL(ppBgDone);
-      // KEEP muted=true throughout: muted elements are exempt from autoplay restrictions.
-      // vid.muted does NOT affect MediaElementAudioSourceNode — audio flows through
-      // the Web Audio gain node regardless.
       vid.muted = true;
+      vid.preload = 'metadata';
+      vid.src = URL.createObjectURL(ppBgDone);
+      vid.load();   // explicit load needed for detached elements in some browsers
 
       const tIsVid = tFile.type.startsWith('video/');
       const tElem = tIsVid ? document.createElement('video') : new Image();
@@ -570,7 +572,11 @@
         new Promise((r, rej) => {
           if (vid.readyState >= 1) { r(); return; }
           vid.onloadedmetadata = r;
-          vid.onerror = () => rej(new Error('Nie można załadować nagrania po zamianie tła'));
+          vid.onerror = () => {
+            const code = vid.error?.code ?? '?';
+            const msg  = vid.error?.message || 'nieznany błąd';
+            rej(new Error(`Błąd ładowania nagrania (kod ${code}: ${msg})`));
+          };
         })
       ]);
       vid.currentTime = 0;
