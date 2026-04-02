@@ -177,6 +177,8 @@ for k, v in {
     "mic_key":          0,
     "edit_src_override": None,  # force source selection from button
     "_upload_sig":       None,  # (name, size) to avoid re-processing on rerun
+    "bg_result":         None,  # bytes — background-replaced video
+    "tc_result":         None,  # bytes — title-card video
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -521,8 +523,8 @@ def apply_processing(y: np.ndarray, sr: int,
 # ─── UI ──────────────────────────────────────────────────────────────────────
 st.title("🎙️  Podcast Studio")
 
-tab_rec, tab_edit = st.tabs(
-    ["⏺  Record", "✂️  Edit & Export"]
+tab_rec, tab_edit, tab_video = st.tabs(
+    ["⏺  Record", "✂️  Edit & Export", "🎬  Video Post-processing"]
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -825,3 +827,197 @@ with tab_edit:
     full_bytes, full_mime = encode_for_download(y_work, sr, full_fmt)
     full_fname = str(Path(full_name).with_suffix("." + full_fmt.lower()))
     st.download_button("💾  Save full audio", full_bytes, full_fname, full_mime, key="dl_full")
+
+
+# ─── Video helpers ────────────────────────────────────────────────────────────
+
+def _replace_background(video_bytes: bytes, bg_bytes: bytes, video_ext: str = ".mp4") -> bytes:
+    """Server-side background replacement using MediaPipe SelfieSegmentation + OpenCV."""
+    import cv2
+    import mediapipe as mp
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        in_path      = td / f"input{video_ext}"
+        bg_path      = td / "background.jpg"
+        noaudio_path = td / "noaudio.mp4"
+        audio_path   = td / "audio.aac"
+        out_path     = td / "output.mp4"
+
+        in_path.write_bytes(video_bytes)
+        bg_path.write_bytes(bg_bytes)
+
+        cap = cv2.VideoCapture(str(in_path))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        bg_img = cv2.imread(str(bg_path))
+        bg_img = cv2.resize(bg_img, (w, h))
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(noaudio_path), fourcc, fps, (w, h))
+
+        mp_seg = mp.solutions.selfie_segmentation
+        with mp_seg.SelfieSegmentation(model_selection=1) as seg:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                result = seg.process(rgb)
+                mask   = result.segmentation_mask
+                mask3  = np.stack([mask] * 3, axis=-1)
+                comp   = (frame * mask3 + bg_img * (1 - mask3)).astype(np.uint8)
+                writer.write(comp)
+
+        cap.release()
+        writer.release()
+
+        # Extract audio from original
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(in_path), "-vn", "-acodec", "copy", str(audio_path)],
+            capture_output=True,
+        )
+
+        # Mux video + audio
+        if audio_path.exists() and audio_path.stat().st_size > 100:
+            subprocess.run(
+                ["ffmpeg", "-y",
+                 "-i", str(noaudio_path), "-i", str(audio_path),
+                 "-c:v", "copy", "-c:a", "copy", str(out_path)],
+                capture_output=True, check=True,
+            )
+        else:
+            out_path = noaudio_path
+
+        return out_path.read_bytes()
+
+
+def _add_title_card(video_bytes: bytes, title_bytes: bytes, duration: float = 30.0) -> bytes:
+    """Prepend a static title card image to the video using MoviePy."""
+    from moviepy.editor import ImageClip, VideoFileClip, concatenate_videoclips
+
+    with tempfile.TemporaryDirectory() as td:
+        td        = Path(td)
+        in_path   = td / "video.mp4"
+        img_path  = td / "title.jpg"
+        out_path  = td / "output.mp4"
+
+        in_path.write_bytes(video_bytes)
+        img_path.write_bytes(title_bytes)
+
+        video = VideoFileClip(str(in_path))
+        intro = (
+            ImageClip(str(img_path))
+            .set_duration(duration)
+            .set_fps(video.fps)
+            .resize(video.size)
+        )
+
+        final = concatenate_videoclips([intro, video])
+        final.write_videofile(
+            str(out_path),
+            codec="libx264",
+            audio_codec="aac",
+            fps=video.fps,
+            logger=None,
+        )
+
+        return out_path.read_bytes()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 – VIDEO POST-PROCESSING
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_video:
+    st.header("Video Post-processing")
+    st.caption("Server-side: background replacement + title card insertion.")
+
+    # ── Section A: Background replacement ─────────────────────────────────────
+    with st.expander("🖼️  Replace background (MediaPipe + OpenCV)", expanded=True):
+        st.markdown("Upload the recorded video and a background image. The server replaces the room background with your image.")
+
+        bga_col, bgb_col = st.columns(2)
+        with bga_col:
+            bg_video_file = st.file_uploader(
+                "Recorded video (WebM / MP4)",
+                type=["webm", "mp4", "mov"],
+                key="bg_video",
+            )
+        with bgb_col:
+            bg_image_file = st.file_uploader(
+                "Background image (JPG / PNG)",
+                type=["jpg", "jpeg", "png"],
+                key="bg_image",
+            )
+
+        if bg_video_file and bg_image_file:
+            if st.button("▶  Replace background", key="run_bg", type="primary"):
+                with st.spinner("Processing — may take 1–2 min for a 10-min video…"):
+                    try:
+                        ext = Path(bg_video_file.name).suffix.lower() or ".mp4"
+                        result_bytes = _replace_background(
+                            bg_video_file.read(),
+                            bg_image_file.read(),
+                            video_ext=ext,
+                        )
+                        st.session_state["bg_result"] = result_bytes
+                        st.success("Done!")
+                    except Exception as exc:
+                        st.error(f"Error: {exc}")
+
+        if st.session_state.get("bg_result"):
+            st.download_button(
+                "💾  Download video with new background",
+                data=st.session_state["bg_result"],
+                file_name="video_new_bg.mp4",
+                mime="video/mp4",
+                key="dl_bg",
+            )
+
+    # ── Section B: Title card ──────────────────────────────────────────────────
+    with st.expander("🎬  Add title card (MoviePy)", expanded=True):
+        st.markdown("Upload the video (already with new background, or raw) and the title card image. A static title screen will be prepended.")
+
+        tc_col1, tc_col2 = st.columns(2)
+        with tc_col1:
+            tc_video_file = st.file_uploader(
+                "Video file (MP4 / WebM)",
+                type=["mp4", "webm", "mov"],
+                key="tc_video",
+            )
+        with tc_col2:
+            tc_image_file = st.file_uploader(
+                "Title card image (JPG / PNG)",
+                type=["jpg", "jpeg", "png"],
+                key="tc_image",
+            )
+
+        tc_duration = st.slider(
+            "Title card duration (seconds)", 5, 120, 30, 5,
+            key="tc_dur",
+        )
+
+        if tc_video_file and tc_image_file:
+            if st.button("▶  Add title card", key="run_tc", type="primary"):
+                with st.spinner("Rendering — MoviePy re-encodes the video…"):
+                    try:
+                        result_bytes = _add_title_card(
+                            tc_video_file.read(),
+                            tc_image_file.read(),
+                            duration=float(tc_duration),
+                        )
+                        st.session_state["tc_result"] = result_bytes
+                        st.success("Done!")
+                    except Exception as exc:
+                        st.error(f"Error: {exc}")
+
+        if st.session_state.get("tc_result"):
+            st.download_button(
+                "💾  Download final video",
+                data=st.session_state["tc_result"],
+                file_name="podcast_final.mp4",
+                mime="video/mp4",
+                key="dl_tc",
+            )
