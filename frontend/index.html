@@ -240,11 +240,18 @@
     analyser.fftSize = 1024;
     analyser.smoothingTimeConstant = 0.6;
     src.connect(analyser);
-    // Keep AudioContext alive — Chrome suspends it without a destination node
-    const silence = actx.createGain();
-    silence.gain.value = 0;
-    analyser.connect(silence);
-    silence.connect(actx.destination);
+    // Keep AudioContext alive — Chrome (post-2023) suspends even with destination node.
+    // Silent oscillator is more reliable than a zero-gain node.
+    const keepAlive = actx.createOscillator();
+    const silencer  = actx.createGain();
+    silencer.gain.value = 0;
+    keepAlive.connect(silencer);
+    silencer.connect(actx.destination);
+    keepAlive.start();
+    // Fallback: resume immediately on any suspension event
+    actx.onstatechange = () => {
+      if (actx.state === 'suspended') actx.resume().catch(() => {});
+    };
     const td = new Uint8Array(analyser.fftSize);
 
     const canvas = $('vu');
@@ -254,6 +261,8 @@
 
     let frameCount = 0;
     function draw(){
+      // Belt-and-suspenders: also resume inside draw loop
+      if (actx.state === 'suspended') actx.resume().catch(() => {});
       vuRaf = requestAnimationFrame(draw);
       frameCount++;
 
